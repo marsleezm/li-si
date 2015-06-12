@@ -57,11 +57,13 @@
 -record(state, {
 	  from :: {pid(), term()},
 	  transaction :: tx(),
-	  updated_partitions :: list(),
+	  %%updated_partitions :: list(),
 	  num_to_ack :: non_neg_integer(),
 	  prepare_time :: non_neg_integer(),
 	  commit_time :: non_neg_integer(),
 	  commit_protocol :: term(),
+      updated_partitions :: dict(),
+      read_set :: dict(),
 	  state :: active | prepared | committing | committed | undefined | aborted}).
 
 %%%===================================================================
@@ -86,7 +88,8 @@ init([From, ClientClock]) ->
     {Transaction,TransactionId} = create_transaction_record(ClientClock),
     SD = #state{
             transaction = Transaction,
-            updated_partitions=[],
+            updated_partitions = dict:new(),
+            read_set = dict:new(),
             prepare_time=0
            },
     From ! {ok, TransactionId},
@@ -127,13 +130,13 @@ perform_singleitem_read(Key,Type) ->
     end.
 
 
-
 %% @doc Contact the leader computed in the prepare state for it to execute the
 %%      operation, wait for it to finish (synchronous) and go to the prepareOP
 %%       to execute the next operation.
 execute_op({Op_type, Args}, Sender,
            SD0=#state{transaction=Transaction,
-                      updated_partitions=Updated_partitions
+                    updated_partitions=UpdatedPartitions,
+                    read_set=ReadSet
 		      }) ->
     case Op_type of
         prepare ->
@@ -147,48 +150,54 @@ execute_op({Op_type, Args}, Sender,
             {Key, Type}=Args,
             Preflist = log_utilities:get_preflist_from_key(Key),
             IndexNode = hd(Preflist),
-	    WriteSet = case lists:keyfind(IndexNode, 1, Updated_partitions) of
-			   false ->
-			       [];
-			   {IndexNode, WS} ->
-			       WS
-		       end,
-            case clocksi_vnode:read_data_item(IndexNode, Transaction, Key, Type, WriteSet) of
+            Reply = case dict:find(IndexNode,  UpdatedPartitions) of
+                        error ->
+                            lager:info("Read from node..."),
+                            clocksi_vnode:read_data_item(IndexNode, Transaction, Key, Type); 
+                        {IndexNode, WS} ->
+                            case lists:keyfind(Key, 1, WS) of
+                                {ok, SnapshotState} ->
+                                    {ok, SnapshotState};
+                                false ->
+                                    clocksi_vnode:read_data_item(IndexNode, Transaction, Key, Type) 
+	                        end
+                    end,
+            case Reply of
                 error ->
                     {reply, {error, unknown}, abort, SD0, 0};
                 {error, Reason} ->
                     {reply, {error, Reason}, abort, SD0, 0};
                 {ok, Snapshot} ->
-                    ReadResult = Type:value(Snapshot),
-                    {reply, {ok, ReadResult}, execute_op, SD0}
-	    end;
+                    ReadSet1 = dict:store(Key, Snapshot, ReadSet),
+                    lager:info("Output ~w", [Snapshot]), 
+                    {reply, {ok, Type:value(Snapshot)}, execute_op, SD0#state{read_set=ReadSet1}}
+            end;
         update ->
-            {Key, Type, Param}=Args,
-	    Preflist = log_utilities:get_preflist_from_key(Key),
-	    IndexNode = hd(Preflist),
-	    WriteSet = case lists:keyfind(IndexNode, 1, Updated_partitions) of
-			   false ->
-			       [];
-			   {IndexNode, WS} ->
-			       WS
-		       end,
-	    case clocksi_downstream:generate_downstream_op(Transaction, IndexNode, Key, Type, Param, WriteSet) of
-		{ok, DownstreamRecord} ->
-		    case WriteSet of
-			[] ->
-			    New_updated_partitions=
-				[{IndexNode,[{Key,Type,DownstreamRecord}]}|Updated_partitions],
-			    {reply, ok, execute_op,
-			     SD0#state{updated_partitions= New_updated_partitions}};
-			_ ->
-			    New_updated_partitions =
-				lists:keyreplace(IndexNode,1,Updated_partitions,{IndexNode,[{Key,Type,DownstreamRecord}|WriteSet]}),
-			    {reply, ok, execute_op, SD0#state
-			     {updated_partitions= New_updated_partitions}}
-		    end;
-		{error, Reason} ->
-		    {reply, {error, Reason}, abort, SD0, 0}
-	    end
+            {Key, Type, Op} = Args,
+            Preflist = log_utilities:get_preflist_from_key(Key),
+            IndexNode = hd(Preflist),
+            UpdatedPartitions1 = case dict:is_key(IndexNode, UpdatedPartitions) of
+                        false ->
+                            dict:store(IndexNode, [{Key, Type, Op}], UpdatedPartitions);
+                        true ->
+                            dict:append(IndexNode, {Key, Type, Op}, UpdatedPartitions)
+                        end,
+            ReadSet1 = case dict:find(Key, ReadSet) of
+                        error ->
+                            Init = Type:new(),
+                            {Param, Actor} = Op,
+                            {ok, NewSnapshot} = Type:update(Param, Actor, Init),
+                            dict:store(Key, NewSnapshot, ReadSet);
+                        {Key, Snapshot} ->
+                            {Param, Actor} = Op,
+                            {ok, NewSnapshot} = Type:update(Param, Actor, Snapshot),
+                            dict:store(Key, NewSnapshot, ReadSet)
+                        end,
+            {reply, ok, execute_op, SD0#state
+                 {updated_partitions = UpdatedPartitions1, read_set = ReadSet1}}
+		%{error, Reason} ->
+		%    {reply, {error, Reason}, abort, SD0, 0}
+	    %end
     end.
 
 
@@ -196,38 +205,40 @@ execute_op({Op_type, Args}, Sender,
 %%      to the "receive_prepared"state.
 prepare(timeout, SD0=#state{
                         transaction = Transaction,
-                        updated_partitions=Updated_partitions, from=_From}) ->
-    case length(Updated_partitions) of
+                        updated_partitions=UpdatedPartitions, from=_From}) ->
+    case dict:size(UpdatedPartitions) of
         0->
             Snapshot_time=Transaction#transaction.snapshot_time,
             {next_state, committing,
             SD0#state{state=committing, commit_time=Snapshot_time}, 0};
-        1-> 
-            clocksi_vnode:single_commit(Updated_partitions, Transaction),
+        1->
+            UpdatedPart = dict:to_list(UpdatedPartitions),
+            %lists:foldl(fun(X, Acc) -> {Part, Keys}= X,
+            %                            Acc++[{Part, [Key || {Key, _Type, _Op} <- Keys]} ]
+            %            end, [], UpdatedPart),
+            clocksi_vnode:single_commit(UpdatedPart, Transaction),
             {next_state, single_committing,
             SD0#state{state=committing, num_to_ack=1}};
-        _->
-            clocksi_vnode:prepare(Updated_partitions, Transaction),
-            Num_to_ack=length(Updated_partitions),
+        N->
+            clocksi_vnode:prepare(UpdatedPartitions, Transaction),
             {next_state, receive_prepared,
-            SD0#state{num_to_ack=Num_to_ack, state=prepared}}
+            SD0#state{num_to_ack=N, state=prepared}}
     end.
 %% @doc state called when 2pc is forced independently of the number of partitions
 %%      involved in the txs.
 prepare_2pc(timeout, SD0=#state{
                         transaction = Transaction,
-                        updated_partitions=Updated_partitions, from=From}) ->
-    case length(Updated_partitions) of
+                        updated_partitions=UpdatedPartitions, from=From}) ->
+    case dict:size(UpdatedPartitions) of
         0->
             Snapshot_time=Transaction#transaction.snapshot_time,
             gen_fsm:reply(From, {ok, Snapshot_time}),
             {next_state, committing_2pc,
             SD0#state{state=committing, commit_time=Snapshot_time}};
-        _->
-            clocksi_vnode:prepare(Updated_partitions, Transaction),
-            Num_to_ack=length(Updated_partitions),
+        N->
+            clocksi_vnode:prepare(UpdatedPartitions, Transaction),
             {next_state, receive_prepared,
-            SD0#state{num_to_ack=Num_to_ack, state=prepared}}
+            SD0#state{num_to_ack=N, state=prepared}}
     end.
 
 %% @doc in this state, the fsm waits for prepare_time from each updated
@@ -268,15 +279,15 @@ single_committing({committed, CommitTime}, S0=#state{from=_From}) ->
 %%      This state expects other process to sen the commit message to 
 %%      start the commit phase.
 committing_2pc(commit, Sender, SD0=#state{transaction = Transaction,
-                              updated_partitions=Updated_partitions,
+                              updated_partitions=UpdatedPartitions,
                               commit_time=Commit_time}) ->
-    NumToAck=length(Updated_partitions),
+    NumToAck=length(UpdatedPartitions),
     case NumToAck of
         0 ->
             {next_state, reply_to_client,
              SD0#state{state=committed, from=Sender},0};
         _ ->
-            clocksi_vnode:commit(Updated_partitions, Transaction, Commit_time),
+            clocksi_vnode:commit(UpdatedPartitions, Transaction, Commit_time),
             {next_state, receive_committed,
              SD0#state{num_to_ack=NumToAck, from=Sender, state=committing}}
     end.
@@ -286,20 +297,19 @@ committing_2pc(commit, Sender, SD0=#state{transaction = Transaction,
 %%      This state is used when no commit message from the client is
 %%      expected 
 committing(timeout, SD0=#state{transaction = Transaction,
-                              updated_partitions=Updated_partitions,
+                              updated_partitions=UpdatedPartitions,
                               commit_time=Commit_time}) ->
-    NumToAck=length(Updated_partitions),
+    NumToAck=length(UpdatedPartitions),
     case NumToAck of
         0 ->
             {next_state, reply_to_client,
              SD0#state{state=committed},0};
         _ ->
-            clocksi_vnode:commit(Updated_partitions, Transaction, Commit_time),
+            clocksi_vnode:commit(UpdatedPartitions, Transaction, Commit_time),
             {next_state, receive_committed,
              SD0#state{num_to_ack=NumToAck, state=committing}}
     end.
 
-%% @doc the fsm waits for acks indicating that each partition has successfully
 
 %% @doc the fsm waits for acks indicating that each partition has successfully
 %%	committed the tx and finishes operation.

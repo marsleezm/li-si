@@ -24,7 +24,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([start_vnode/1,
-	 read_data_item/5,
+	 read_data_item/4,
 	 get_cache_name/2,
          prepare/2,
          commit/3,
@@ -54,8 +54,6 @@
 %%          partition: the partition that the vnode is responsible for.
 %%          prepared_tx: a list of prepared transactions.
 %%          committed_tx: a list of committed transactions.
-%%          active_txs_per_key: a list of the active transactions that
-%%              have updated a key (but not yet finished).
 %%          downstream_set: a list of the downstream operations that the
 %%              transactions generate.
 %%          write_set: a list of the write sets that the transactions
@@ -64,7 +62,7 @@
 -record(state, {partition :: non_neg_integer(),
                 prepared_tx :: cache_id(),
                 committed_tx :: cache_id(),
-                active_txs_per_key :: cache_id()}).
+                inmemory_store :: cache_id()}).
 
 %%%===================================================================
 %%% API
@@ -74,15 +72,12 @@ start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
 
 %% @doc Sends a read request to the Node that is responsible for the Key
-read_data_item(Node, TxId, Key, Type, Updates) ->
+read_data_item(Node, TxId, Key, Type) ->
     case clocksi_readitem_fsm:read_data_item(Node,Key,Type,TxId) of
         {ok, Snapshot} ->
-	    Updates2=filter_updates_per_key(Updates, Key),
-	    Snapshot2=clocksi_materializer:materialize_eager
-			(Type, Snapshot, Updates2),
-	    {ok, Snapshot2};
-	Other ->
-	    Other
+	        {ok, Snapshot};
+	    Other ->
+	        Other
     end.
 
 
@@ -131,14 +126,14 @@ get_cache_name(Partition,Base) ->
 %% @doc Initializes all data structures that vnode needs to track information
 %%      the transactions it participates on.
 init([Partition]) ->
-    PreparedTx = open_table(Partition),
+    PreparedTx = open_table(Partition, prepared),
     CommittedTx = ets:new(committed_tx,[set]),
-    ActiveTxsPerKey = ets:new(active_txs_per_key,[bag]),
+    InMemoryStore = open_table(Partition, inmemory_store),
     clocksi_readitem_fsm:start_read_servers(Partition),
     {ok, #state{partition=Partition,
                 prepared_tx=PreparedTx,
                 committed_tx=CommittedTx,
-                active_txs_per_key=ActiveTxsPerKey}}.
+                inmemory_store=InMemoryStore}}.
 
 
 
@@ -165,25 +160,24 @@ check_table_ready([{Partition,_Node}|Rest]) ->
     end.
 
 
-open_table(Partition) ->
+open_table(Partition, Name) ->
     try
-	ets:new(get_cache_name(Partition,prepared),
+	ets:new(get_cache_name(Partition,Name),
 		[set,protected,named_table,?TABLE_CONCURRENCY])
     catch
 	_:_Reason ->
 	    %% Someone hasn't finished cleaning up yet
-	    open_table(Partition)
+	    open_table(Partition, Name)
     end.
 
 
 handle_command({prepare, Transaction, WriteSet}, _Sender,
                State = #state{partition=_Partition,
                               committed_tx=CommittedTx,
-                              active_txs_per_key=ActiveTxPerKey,
                               prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
-    {Result, NewPrepare} = prepare(Transaction, WriteSet, CommittedTx, ActiveTxPerKey, PreparedTx, PrepareTime),
+    {Result, NewPrepare} = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime),
     case Result of
         {ok, _} ->
             {reply, {prepared, NewPrepare}, State};
@@ -198,13 +192,13 @@ handle_command({prepare, Transaction, WriteSet}, _Sender,
 handle_command({single_commit, Transaction, WriteSet}, _Sender,
                State = #state{partition=_Partition,
                               committed_tx=CommittedTx,
-                              active_txs_per_key=ActiveTxPerKey,
                               prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
-    {Result,NewPrepare} = prepare(Transaction, WriteSet, CommittedTx, ActiveTxPerKey, PreparedTx, PrepareTime),
+    %lager:info("Before preparing"),
+    {Result,NewPrepare} = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime),
     case Result of
-        {ok, _} ->
+        ok ->
             ResultCommit = commit(Transaction, NewPrepare, WriteSet, PreparedTx, State),
             case ResultCommit of
                 {ok, committed} ->
@@ -247,16 +241,16 @@ handle_command({abort, Transaction, Updates}, _Sender,
                #state{partition=_Partition} = State) ->
     TxId = Transaction#transaction.txn_id,
     case Updates of
-    [{Key, _Type, {_Op, _Actor}} | _Rest] -> 
-            LogId = log_utilities:get_logid_from_key(Key),
-            [Node] = log_utilities:get_preflist_from_key(Key),
-            Result = logging_vnode:append(Node,LogId,{TxId, aborted}),
-            case Result of
-                {ok, _} ->
-                    clean_and_notify(TxId, Key, State);
-                {error, timeout} ->
-                    clean_and_notify(TxId, Key, State)
-            end,
+    [{Key, _Value} | _Rest] -> 
+            %LogId = log_utilities:get_logid_from_key(Key),
+            %[Node] = log_utilities:get_preflist_from_key(Key),
+            %Result = logging_vnode:append(Node,LogId,{TxId, aborted}),
+            %case Result of
+            %    {ok, _} ->
+                    clean_and_notify(TxId, Key, State),
+            %    {error, timeout} ->
+            %        clean_and_notify(TxId, Key, State)
+            %end,
             {reply, ack_abort, State};
         _ ->
             {reply, {error, no_tx_record}, State}
@@ -316,23 +310,23 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%% Internal Functions
 %%%===================================================================
 
-prepare(Transaction, TxWriteSet, CommittedTx, ActiveTxPerKey, PreparedTx, PrepareTime)->
+prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime)->
     TxId = Transaction#transaction.txn_id,
-    case certification_check(TxId, TxWriteSet, CommittedTx, ActiveTxPerKey) of
+    case certification_check(TxId, TxWriteSet, CommittedTx) of
         true ->
             case TxWriteSet of 
-                [{Key, Type, {Op, Actor}} | Rest] -> 
-		    PrepList = set_prepared(PreparedTx,[{Key, Type, {Op, Actor}} | Rest],TxId,PrepareTime,[]),
+                [{Key, Type, Op} | Rest] -> 
+		    PrepList = set_prepared(PreparedTx,[{Key, Type, Op} | Rest],TxId,PrepareTime,[]),
 		    NewPrepare = now_microsec(erlang:now()),
-		    reset_prepared(PreparedTx,[{Key, Type, {Op, Actor}} | Rest],TxId,NewPrepare,PrepList),
-		    LogRecord = #log_record{tx_id=TxId,
-					    op_type=prepare,
-					    op_payload=NewPrepare},
-                    LogId = log_utilities:get_logid_from_key(Key),
-                    [Node] = log_utilities:get_preflist_from_key(Key),
-		    NewUpdates = write_set_to_logrecord(TxId,TxWriteSet),
-                    Result = logging_vnode:append_group(Node,LogId,NewUpdates ++ [LogRecord]),
-		    {Result, NewPrepare};
+		    reset_prepared(PreparedTx,[{Key, Type, Op} | Rest],TxId,NewPrepare,PrepList),
+		    %LogRecord = #log_record{tx_id=TxId,
+			%		    op_type=prepare,
+			%		    op_payload=NewPrepare},
+            %        LogId = log_utilities:get_logid_from_key(Key),
+            %        [Node] = log_utilities:get_preflist_from_key(Key),
+		    %        NewUpdates = write_set_to_logrecord(TxId,TxWriteSet),
+            %        Result = logging_vnode:append_group(Node,LogId,NewUpdates ++ [LogRecord]),
+		    {ok, NewPrepare};
 		_ ->
 		    {error, no_updates}
 	    end;
@@ -343,7 +337,7 @@ prepare(Transaction, TxWriteSet, CommittedTx, ActiveTxPerKey, PreparedTx, Prepar
 
 set_prepared(_PreparedTx,[],_TxId,_Time,Acc) ->
     lists:reverse(Acc);
-set_prepared(PreparedTx,[{Key, _Type, {_Op, _Actor}} | Rest],TxId,Time,Acc) ->
+set_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId,Time,Acc) ->
     ActiveTxs = case ets:lookup(PreparedTx, Key) of
 		    [] ->
 			[];
@@ -355,34 +349,37 @@ set_prepared(PreparedTx,[{Key, _Type, {_Op, _Actor}} | Rest],TxId,Time,Acc) ->
 
 reset_prepared(_PreparedTx,[],_TxId,_Time,[]) ->
     ok;
-reset_prepared(PreparedTx,[{Key, _Type, {_Op, _Actor}} | Rest],TxId,Time,[ActiveTxs|Rest2]) ->
+reset_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId,Time,[ActiveTxs|Rest2]) ->
     true = ets:insert(PreparedTx, {Key, [{TxId, Time}|ActiveTxs]}),
     set_prepared(PreparedTx,Rest,TxId,Time,Rest2).
 
 
-commit(Transaction, TxCommitTime, Updates, _CommittedTx, State)->
+commit(Transaction, TxCommitTime, Updates, _CommittedTx, 
+                                State=#state{inmemory_store=InMemoryStore})->
     TxId = Transaction#transaction.txn_id,
-    DcId = dc_utilities:get_my_dc_id(),
-    LogRecord=#log_record{tx_id=TxId,
-                          op_type=commit,
-                          op_payload={{DcId, TxCommitTime},
-                                      Transaction#transaction.vec_snapshot_time}},
+    %DcId = dc_utilities:get_my_dc_id(),
+    %LogRecord=#log_record{tx_id=TxId,
+    %                      op_type=commit,
+    %                      op_payload={{DcId, TxCommitTime},
+    %                                  Transaction#transaction.vec_snapshot_time}},
     case Updates of
-        [{Key, _Type, {_Op, _Param}} | _Rest] -> 
-            LogId = log_utilities:get_logid_from_key(Key),
-            [Node] = log_utilities:get_preflist_from_key(Key),
-            case logging_vnode:append(Node,LogId,LogRecord) of
-                {ok, _} ->
-                    case update_materializer(Updates, Transaction, TxCommitTime) of
+        [{_Key, _Type, _Value} | _Rest] -> 
+            %LogId = log_utilities:get_logid_from_key(Key),
+            %[Node] = log_utilities:get_preflist_from_key(Key),
+            %case logging_vnode:append(Node,LogId,LogRecord) of
+            %    {ok, _} ->
+                    %lager:info("Trying to store"),
+                    case update_store(Updates, Transaction, TxCommitTime, InMemoryStore) of
                         ok ->
+                         %  lager:info("Done store"),
                             clean_and_notify(TxId,Updates,State),
                             {ok, committed};
                         error ->
                             {error, materializer_failure}
                     end;
-                {error, timeout} ->
-                    {error, timeout}
-            end;
+            %    {error, timeout} ->
+            %        {error, timeout}
+            %end;
         _ -> 
             {error, no_updates}
     end.
@@ -399,13 +396,13 @@ commit(Transaction, TxCommitTime, Updates, _CommittedTx, State)->
 %%      a. ActiteTxsPerKey,
 %%      b. PreparedTx
 %%
-clean_and_notify(TxId, Updates, #state{active_txs_per_key=_ActiveTxsPerKey,
+clean_and_notify(TxId, Updates, #state{
 			      prepared_tx=PreparedTx}) ->
     clean_prepared(PreparedTx,Updates,TxId).
 
 clean_prepared(_PreparedTx,[],_TxId) ->
     ok;
-clean_prepared(PreparedTx,[{Key, _Type, {_Op, _Actor}} | Rest],TxId) ->
+clean_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId) ->
     [{Key,ActiveTxs}] = ets:lookup(PreparedTx, Key),
     NewActive = lists:keydelete(TxId,1,ActiveTxs),
     true = ets:insert(PreparedTx, {Key, NewActive}),
@@ -419,7 +416,7 @@ now_microsec({MegaSecs, Secs, MicroSecs}) ->
 
 %% @doc Performs a certification check when a transaction wants to move
 %%      to the prepared state.
-certification_check(_TxId, _H, _CommittedTx, _ActiveTxPerKey) ->
+certification_check(_TxId, _H, _CommittedTx) ->
     true.
 %% certification_check(_, [], _, _) ->
 %%     true;
@@ -450,37 +447,36 @@ certification_check(_TxId, _H, _CommittedTx, _ActiveTxPerKey) ->
 %%             check_keylog(TxId, T, CommittedTx)
 %%     end.
 
--spec update_materializer(DownstreamOps :: [{term(),key(),type(),op()}],
-                          Transaction::tx(),TxCommitTime:: {term(), term()}) ->
+-spec update_store(KeyValues :: [{key(), atom(), term()}],
+                          Transaction::tx(),TxCommitTime:: {term(), term()},
+                                InMemoryStore :: cache_id()) ->
                                  ok | error.
-update_materializer(DownstreamOps, Transaction, TxCommitTime) ->
-    DcId = dc_utilities:get_my_dc_id(),
-    UpdateFunction = fun ({Key, Type, Op}, AccIn) ->
-                             CommittedDownstreamOp =
-                                 #clocksi_payload{
-                                    key = Key,
-                                    type = Type,
-                                    op_param = Op,
-                                    snapshot_time = Transaction#transaction.vec_snapshot_time,
-                                    commit_time = {DcId, TxCommitTime},
-                                    txid = Transaction#transaction.txn_id},
-                             AccIn++[materializer_vnode:update(Key, CommittedDownstreamOp)]
-                     end,
-    Results = lists:foldl(UpdateFunction, [], DownstreamOps),
-    Failures = lists:filter(fun(Elem) -> Elem /= ok end, Results),
-    case length(Failures) of
-        0 ->
-            ok;
-        _ ->
-            error
-    end.
+update_store([], _Transaction, _TxCommitTime, _InMemoryStore) ->
+    ok;
+update_store([{Key, Type, {Param, Actor}}|Rest], Transaction, TxCommitTime, InMemoryStore) ->
+    %lager:info("Store ~w",[InMemoryStore]),
+    case ets:lookup(InMemoryStore, Key) of
+        [] ->
+     %       lager:info("Wrote ~w to key ~w",[Value, Key]),
+            Init = Type:new(),
+            {ok, NewSnapshot} = Type:update(Param, Actor, Init),
+            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]}), 
+            update_store(Rest, Transaction, TxCommitTime, InMemoryStore);
+        [{Key, ValueList}] ->
+      %      lager:info("Wrote ~w to key ~w with ~w",[Value, Key, ValueList]),
+            {RemainList, _} = lists:split(min(20,length(ValueList)), ValueList),
+            [{_CommitTime, First}|_] = RemainList,
+            {ok, NewSnapshot} = Type:update(Param, Actor, First),
+            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]}),
+            update_store(Rest, Transaction, TxCommitTime, InMemoryStore)
+    end,
+    ok.
 
-write_set_to_logrecord(TxId, WriteSet) ->
-    lists:foldl(fun({Key,Type,Op}, Acc) ->
-			Acc ++ [#log_record{tx_id=TxId, op_type=update,
-					    op_payload={Key, Type, Op}}]
-		end,[],WriteSet).
-
+%write_set_to_logrecord(TxId, WriteSet) ->
+%    lists:foldl(fun({Key,Type,Op}, Acc) ->
+%			Acc ++ [#log_record{tx_id=TxId, op_type=update,
+%					    op_payload={Key, Type, Op}}]
+%		end,[],WriteSet).
 
 %% Internal functions
 filter_updates_per_key(Updates, Key) ->

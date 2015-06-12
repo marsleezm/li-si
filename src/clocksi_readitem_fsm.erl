@@ -50,7 +50,6 @@
 
 -record(state, {partition :: non_neg_integer(),
 		id :: non_neg_integer(),
-		ops_cache :: cache_id(),
 		snapshot_cache :: cache_id(),
 		prepared_cache :: cache_id(),
 		self :: atom()}).
@@ -140,42 +139,42 @@ generate_random_server_name(Node, Partition) ->
 
 init([Partition, Id]) ->
     Addr = node(),
-    OpsCache = materializer_vnode:get_cache_name(Partition,ops_cache),
-    SnapshotCache = materializer_vnode:get_cache_name(Partition,snapshot_cache),
+    SnapshotCache = clocksi_vnode:get_cache_name(Partition,inmemory_store),
     PreparedCache = clocksi_vnode:get_cache_name(Partition,prepared),
     Self = generate_server_name(Addr,Partition,Id),
-    {ok, #state{partition=Partition, id=Id, ops_cache=OpsCache,
+    {ok, #state{partition=Partition, id=Id, 
 		snapshot_cache=SnapshotCache,
 		prepared_cache=PreparedCache,self=Self}}.
 
 handle_call({perform_read, Key, Type, Transaction},Coordinator,
-	    SD0=#state{ops_cache=OpsCache,snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
-    perform_read_internal(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self),
+	    SD0=#state{snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
+    perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self),
     {noreply,SD0};
 
 handle_call({go_down},_Sender,SD0) ->
     {stop,shutdown,ok,SD0}.
 
 handle_cast({perform_read_cast, Coordinator, Key, Type, Transaction},
-	    SD0=#state{ops_cache=OpsCache,snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
-    perform_read_internal(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self),
+	    SD0=#state{snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
+    perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self),
     {noreply,SD0}.
 
-perform_read_internal(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self) ->
+perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self) ->
     case check_clock(Key,Transaction,PreparedCache) of
 	not_ready ->
-	    spin_wait(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self);
-	    %%perform_read_internal(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self);
+	    spin_wait(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self);
+	    %%perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self);
 	ready ->
-	    return(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache)
+        %lager:info("Read ready"),
+	    return(Coordinator,Key,Type,Transaction,SnapshotCache)
     end.
 
-spin_wait(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self) ->
+spin_wait(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self) ->
     {message_queue_len,Length} = process_info(self(), message_queue_len),
     case Length of
 	0 ->
 	    timer:sleep(?SPIN_WAIT),
-	    perform_read_internal(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache,PreparedCache,Self);
+	    perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self);
 	_ ->
 	    gen_server:cast({global,Self},{perform_read_cast,Coordinator,Key,Type,Transaction})
     end.
@@ -222,15 +221,16 @@ check_prepared_list(Key,SnapshotTime,[{_TxId,Time}|Rest]) ->
 
 %% @doc return:
 %%  - Reads and returns the log of specified Key using replication layer.
-return(Coordinator,Key,Type,Transaction,OpsCache,SnapshotCache) ->
+return(Coordinator,Key, Type,Transaction, SnapshotCache) ->
     VecSnapshotTime = Transaction#transaction.vec_snapshot_time,
-    TxId = Transaction#transaction.txn_id,
-    case materializer_vnode:read(Key, Type, VecSnapshotTime, TxId,OpsCache,SnapshotCache) of
-        {ok, Snapshot} ->
-            Reply={ok, Snapshot};
-        {error, Reason} ->
-            Reply={error, Reason}
-    end,
+    Reply = case ets:lookup(SnapshotCache, Key) of
+                [] ->
+                    {ok, Type:new()};
+                [{Key, ValueList}] ->
+    %lager:info("Key is ~w, Transaciton is ~w, Valuelist ~w", [Key, Transaction, ValueList]),
+                    MyClock = vectorclock:get_clock_of_dc(dc_utilities:get_my_dc_id(), VecSnapshotTime),
+                    find_version(ValueList, MyClock)
+            end,
     gen_server:reply(Coordinator, Reply).
 
 handle_info(_Info, StateData) ->
@@ -247,3 +247,14 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 terminate(_Reason, _SD) ->
     ok.
 
+%%%%%%%%%Intenal%%%%%%%%%%%%%%%%%%
+find_version([], _SnapshotTime) ->
+    %{error, not_found};
+    {ok, null};
+find_version([{TS, Value}|Rest], SnapshotTime) ->
+    case SnapshotTime > TS of
+        true ->
+            {ok, Value};
+        false ->
+            find_version(Rest, SnapshotTime)
+    end.
