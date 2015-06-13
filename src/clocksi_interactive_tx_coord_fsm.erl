@@ -130,7 +130,7 @@ init([From, ClientClock]) ->
 create_transaction_record(ClientClock) ->
     %% Seed the random because you pick a random read server, this is stored in the process state
     {A1,A2,A3} = now(),
-    random:seed(A1, A2, A3),
+    _ = random:seed(A1, A2, A3),
     {ok, SnapshotTime} = case ClientClock of
         ignore ->
             get_snapshot_time();
@@ -414,11 +414,11 @@ terminate(_Reason, _SN, _SD) ->
 %%       starting this transaction has seen, and
 %%     2.machine's local time, as returned by erlang:now().
 -spec get_snapshot_time(snapshot_time())
-                       -> {ok, snapshot_time()} | {error, reason()}.
+                       -> {ok, snapshot_time()}.
 get_snapshot_time(ClientClock) ->
     wait_for_clock(ClientClock).
 
--spec get_snapshot_time() -> {ok, snapshot_time()} | {error, reason()}.
+-spec get_snapshot_time() -> {ok, snapshot_time()}.
 get_snapshot_time() ->
     Now = clocksi_vnode:now_microsec(erlang:now()) - ?OLD_SS_MICROSEC,
     case ?VECTORCLOCK:get_stable_snapshot() of
@@ -428,13 +428,11 @@ get_snapshot_time() ->
                                        fun (_Old) -> Now end,
                                        Now, VecSnapshotTime),
 
-            {ok, SnapshotTime};
-        {error, Reason} ->
-            {error, Reason}
+            {ok, SnapshotTime}
     end.
 
 -spec wait_for_clock(snapshot_time()) ->
-                           {ok, snapshot_time()} | {error, reason()}.
+                           {ok, snapshot_time()}.
 wait_for_clock(Clock) ->
    case get_snapshot_time() of
        {ok, VecSnapshotTime} ->
@@ -449,9 +447,7 @@ wait_for_clock(Clock) ->
                    %% wait for snapshot time to catch up with Client Clock
                    timer:sleep(10),
                    wait_for_clock(Clock)
-           end;
-       {error, Reason} ->
-          {error, Reason}
+           end
   end.
 
 

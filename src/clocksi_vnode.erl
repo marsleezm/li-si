@@ -177,12 +177,10 @@ handle_command({prepare, Transaction, WriteSet}, _Sender,
                               prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
-    {Result, NewPrepare} = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime),
+    Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime),
     case Result of
-        {ok, _} ->
+        {ok, NewPrepare} ->
             {reply, {prepared, NewPrepare}, State};
-        {error, timeout} ->
-            {reply, {error, timeout}, State};
         {error, no_updates} ->
             {reply, {error, no_tx_record}, State};
         {error, write_conflict} ->
@@ -196,17 +194,15 @@ handle_command({single_commit, Transaction, WriteSet}, _Sender,
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     %lager:info("Before preparing"),
-    {Result,NewPrepare} = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime),
+    Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime),
     case Result of
-        ok ->
+        {ok, NewPrepare} ->
             ResultCommit = commit(Transaction, NewPrepare, WriteSet, PreparedTx, State),
             case ResultCommit of
                 {ok, committed} ->
                     {reply, {committed, NewPrepare}, State};
-                {error, materializer_failure} ->
-                    {reply, {error, materializer_failure}, State};
-                {error, timeout} ->
-                    {reply, {error, timeout}, State};
+                %{error, timeout} ->
+                %    {reply, {error, timeout}, State};
                 {error, no_updates} ->
                     {reply, no_tx_record, State}
             end;
@@ -229,10 +225,10 @@ handle_command({commit, Transaction, TxCommitTime, Updates}, _Sender,
     case Result of
         {ok, committed} ->
             {reply, committed, State};
-        {error, materializer_failure} ->
-            {reply, {error, materializer_failure}, State};
-        {error, timeout} ->
-            {reply, {error, timeout}, State};
+        %{error, materializer_failure} ->
+        %    {reply, {error, materializer_failure}, State};
+        %{error, timeout} ->
+        %    {reply, {error, timeout}, State};
         {error, no_updates} ->
             {reply, no_tx_record, State}
     end;
@@ -369,14 +365,9 @@ commit(Transaction, TxCommitTime, Updates, _CommittedTx,
             %case logging_vnode:append(Node,LogId,LogRecord) of
             %    {ok, _} ->
                     %lager:info("Trying to store"),
-                    case update_store(Updates, Transaction, TxCommitTime, InMemoryStore) of
-                        ok ->
-                         %  lager:info("Done store"),
-                            clean_and_notify(TxId,Updates,State),
-                            {ok, committed};
-                        error ->
-                            {error, materializer_failure}
-                    end;
+                     update_store(Updates, Transaction, TxCommitTime, InMemoryStore),
+                     clean_and_notify(TxId,Updates,State),
+                     {ok, committed};
             %    {error, timeout} ->
             %        {error, timeout}
             %end;
