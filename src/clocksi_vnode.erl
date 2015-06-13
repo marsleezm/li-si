@@ -83,7 +83,7 @@ read_data_item(Node, TxId, Key, Type) ->
 
 %% @doc Sends a prepare request to a Node involved in a tx identified by TxId
 prepare(ListofNodes, TxId) ->
-    lists:foldl(fun({Node,WriteSet},_Acc) ->
+    dict:fold(fun(Node,WriteSet,_Acc) ->
 			riak_core_vnode_master:command(Node,
 						       {prepare, TxId,WriteSet},
 						       {fsm, undefined, self()},
@@ -102,7 +102,7 @@ single_commit([{Node,WriteSet}], TxId) ->
 
 %% @doc Sends a commit request to a Node involved in a tx identified by TxId
 commit(ListofNodes, TxId, CommitTime) ->
-    lists:foldl(fun({Node,WriteSet},_Acc) ->
+    dict:fold(fun(Node,WriteSet,_Acc) ->
 			riak_core_vnode_master:command(Node,
 						       {commit, TxId, CommitTime, WriteSet},
 						       {fsm, undefined, self()},
@@ -111,7 +111,7 @@ commit(ListofNodes, TxId, CommitTime) ->
 
 %% @doc Sends a commit request to a Node involved in a tx identified by TxId
 abort(ListofNodes, TxId) ->
-    lists:foldl(fun({Node,WriteSet},_Acc) ->
+    dict:fold(fun(Node,WriteSet,_Acc) ->
 			riak_core_vnode_master:command(Node,
 						       {abort, TxId, WriteSet},
 						       {fsm, undefined, self()},
