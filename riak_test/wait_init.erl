@@ -15,23 +15,26 @@ wait_ready_nodes([Node|Rest]) ->
     end.
 
 check_ready(Node) ->
-    lager:info("Waiting for clocksi"),
+    lager:info("Checking if node ~w is ready ~n", [Node]),
     case rpc:call(Node,clocksi_vnode,check_tables_ready,[]) of
 	true ->
         lager:info("Waiting for readitemfsm"),
 	    case rpc:call(Node,clocksi_readitem_fsm,check_servers_ready,[]) of
 		true ->
-                lager:info("Done"),
 		    %case rpc:call(Node,materializer_vnode,check_tables_ready,[]) of
 			%true ->
+			%    lager:info("Node ~w is ready! ~n", [Node]),
 			    true;
 			%false ->
+			%    lager:info("Node ~w is not ready ~n", [Node]),
 			%    false
 		    %end;
 		false ->
+		    lager:info("Checking if node ~w is ready ~n", [Node]),
 		    false
 	    end;
 	false ->
+	    lager:info("Checking if node ~w is ready ~n", [Node]),
 	    false
     end.
 

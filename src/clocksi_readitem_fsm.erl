@@ -44,6 +44,7 @@
 %% States
 -export([read_data_item/4,
         async_read_data_item/4,
+	 check_partition_ready/3,
 	 start_read_servers/1,
 	 stop_read_servers/1]).
 
@@ -75,7 +76,7 @@ stop_read_servers(Partition) ->
 read_data_item({Partition,Node},Key,Type,Transaction) ->
     try
 	gen_server:call({global,generate_random_server_name(Node,Partition)},
-			{perform_read,Key,Type,Transaction})
+			{perform_read,Key,Type,Transaction},infinity)
     catch
         _:Reason ->
             lager:error("Exception caught: ~p", [Reason]),
@@ -100,7 +101,11 @@ check_servers_ready() ->
 check_server_ready([]) ->
     true;
 check_server_ready([{Partition,Node}|Rest]) ->
-    case check_partition_ready(Node,Partition,?READ_CONCURRENCY) of
+    Result = riak_core_vnode_master:sync_command({Partition,Node},
+						 {check_servers_ready},
+						 ?CLOCKSI_MASTER,
+						 infinity),
+    case Result of
 	false ->
 	    false;
 	true ->
@@ -111,9 +116,9 @@ check_partition_ready(_Node,_Partition,0) ->
     true;
 check_partition_ready(Node,Partition,Num) ->
     case global:whereis_name(generate_server_name(Node,Partition,Num)) of
-	undfined ->
+	undefined ->
 	    false;
-	_ ->
+	_Res ->
 	    check_partition_ready(Node,Partition,Num-1)
     end.
 
@@ -126,7 +131,7 @@ check_partition_ready(Node,Partition,Num) ->
 start_read_servers_internal(_Node,_Partition,0) ->
     ok;
 start_read_servers_internal(Node, Partition, Num) ->
-    clocksi_readitem_sup:start_fsm(Partition,Num),
+    {ok,_Id} = clocksi_readitem_sup:start_fsm(Partition,Num),
     start_read_servers_internal(Node, Partition, Num-1).
 
 stop_read_servers_internal(_Node,_Partition,0) ->
@@ -244,7 +249,7 @@ return(Coordinator,Key, Type,Transaction, SnapshotCache) ->
     gen_server:reply(Coordinator, Reply).
 
 handle_info(_Info, StateData) ->
-    {no_reply,StateData}.
+    {noreply,StateData}.
 
 handle_event(_Event, _StateName, StateData) ->
     {stop,badmsg,StateData}.

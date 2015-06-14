@@ -88,7 +88,7 @@ prepare(ListofNodes, TxId) ->
 						       {prepare, TxId,WriteSet},
 						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
-		end, 0, ListofNodes).
+		end, ok, ListofNodes).
 
 
 %% @doc Sends prepare+commit to a single partition
@@ -107,7 +107,7 @@ commit(ListofNodes, TxId, CommitTime) ->
 						       {commit, TxId, CommitTime, WriteSet},
 						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
-		end, 0, ListofNodes).
+		end, ok, ListofNodes).
 
 %% @doc Sends a commit request to a Node involved in a tx identified by TxId
 abort(ListofNodes, TxId) ->
@@ -116,7 +116,7 @@ abort(ListofNodes, TxId) ->
 						       {abort, TxId, WriteSet},
 						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
-		end, 0, ListofNodes).
+		end, ok, ListofNodes).
 
 
 get_cache_name(Partition,Base) ->
@@ -145,13 +145,11 @@ check_tables_ready() ->
 
 check_table_ready([]) ->
     true;
-check_table_ready([{Partition,_Node}|Rest]) ->
-    Result = case ets:info(get_cache_name(Partition,prepared)) of
-		 undefined ->
-		     false;
-		 _ ->
-		     true
-	     end,
+check_table_ready([{Partition,Node}|Rest]) ->
+    Result = riak_core_vnode_master:sync_command({Partition,Node},
+						 {check_tables_ready},
+						 ?CLOCKSI_MASTER,
+						 infinity),
     case Result of
 	true ->
 	    check_table_ready(Rest);
@@ -170,6 +168,19 @@ open_table(Partition, Name) ->
 	    open_table(Partition, Name)
     end.
 
+handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
+    Result = case ets:info(get_cache_name(Partition,prepared)) of
+		 undefined ->
+		     false;
+		 _ ->
+		     true
+	     end,
+    {reply, Result, SD0};
+    
+handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
+    Node = node(),
+    Result = clocksi_readitem_fsm:check_partition_ready(Node,Partition,?READ_CONCURRENCY),
+    {reply, Result, SD0};
 
 handle_command({prepare, Transaction, WriteSet}, _Sender,
                State = #state{partition=_Partition,
@@ -325,9 +336,9 @@ prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime)->
 		    {ok, NewPrepare};
 		_ ->
 		    {error, no_updates}
-	    end;
-	false ->
-	    {error, write_conflict}
+	    end
+	    %% false ->
+	    %%     {error, write_conflict}
     end.
 
 
@@ -347,7 +358,7 @@ reset_prepared(_PreparedTx,[],_TxId,_Time,[]) ->
     ok;
 reset_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId,Time,[ActiveTxs|Rest2]) ->
     true = ets:insert(PreparedTx, {Key, [{TxId, Time}|ActiveTxs]}),
-    set_prepared(PreparedTx,Rest,TxId,Time,Rest2).
+    reset_prepared(PreparedTx,Rest,TxId,Time,Rest2).
 
 
 commit(Transaction, TxCommitTime, Updates, _CommittedTx, 

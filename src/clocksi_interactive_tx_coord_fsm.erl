@@ -126,11 +126,10 @@ init([From, ClientClock]) ->
     From ! {ok, TransactionId},
     {ok, execute_op, SD}.
 
--spec create_transaction_record(snapshot_time()) -> {txid(),tx()}.
+-spec create_transaction_record(snapshot_time() | ignore) -> {tx(),txid()}.
 create_transaction_record(ClientClock) ->
     %% Seed the random because you pick a random read server, this is stored in the process state
-    {A1,A2,A3} = now(),
-    _ = random:seed(A1, A2, A3),
+    _Res = random:seed(now()),
     {ok, SnapshotTime} = case ClientClock of
         ignore ->
             get_snapshot_time();
@@ -148,7 +147,7 @@ create_transaction_record(ClientClock) ->
 -spec perform_singleitem_read(key(),type()) -> {ok,val()} | {error,reason()}.
 perform_singleitem_read(Key,Type) ->
     {Transaction,_TransactionId} = create_transaction_record(ignore),
-    Preflist = log_utilities:get_preflist_from_key(Key),
+    Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
     IndexNode = hd(Preflist),
     case ?CLOCKSI_VNODE:read_data_item(IndexNode, Key, Type, Transaction) of
 	error ->
@@ -258,7 +257,7 @@ prepare_2pc(timeout, SD0=#state{
     case dict:size(UpdatedPartitions) of
         0->
             Snapshot_time=Transaction#transaction.snapshot_time,
-            gen_fsm:reply(From, {ok, Snapshot_time}),
+            _Res = gen_fsm:reply(From, {ok, Snapshot_time}),
             {next_state, committing_2pc,
             SD0#state{state=committing, commit_time=Snapshot_time}};
         N->
@@ -279,7 +278,7 @@ receive_prepared({prepared, ReceivedPrepareTime},
     case NumToAck of 1 ->
             case CommitProtocol of
             two_phase ->
-                gen_fsm:reply(From, {ok, MaxPrepareTime}),
+                _Res = gen_fsm:reply(From, {ok, MaxPrepareTime}),
                 {next_state, committing_2pc,
                 S0#state{prepare_time=MaxPrepareTime, commit_time=MaxPrepareTime, state=committing}};
             _ ->
@@ -421,34 +420,26 @@ get_snapshot_time(ClientClock) ->
 -spec get_snapshot_time() -> {ok, snapshot_time()}.
 get_snapshot_time() ->
     Now = clocksi_vnode:now_microsec(erlang:now()) - ?OLD_SS_MICROSEC,
-    case ?VECTORCLOCK:get_stable_snapshot() of
-        {ok, VecSnapshotTime} ->
-            DcId = ?DC_UTIL:get_my_dc_id(),
-            SnapshotTime = dict:update(DcId,
-                                       fun (_Old) -> Now end,
-                                       Now, VecSnapshotTime),
-
-            {ok, SnapshotTime}
-    end.
+    {ok, VecSnapshotTime} = ?VECTORCLOCK:get_stable_snapshot(),
+    DcId = ?DC_UTIL:get_my_dc_id(),
+    SnapshotTime = dict:update(DcId,
+                    fun (_Old) -> Now end,
+                        Now, VecSnapshotTime),
+    {ok, SnapshotTime}.
 
 -spec wait_for_clock(snapshot_time()) ->
                            {ok, snapshot_time()}.
 wait_for_clock(Clock) ->
-   case get_snapshot_time() of
-       {ok, VecSnapshotTime} ->
-	   %% dict:fold(fun(Dc,Time,_Acc) ->
-	   %% 		     lager:info("Dc ~w, time ~w~n", [Dc,Time])
-	   %% 	     end, 0, VecSnapshotTime),
-           case vectorclock:ge(VecSnapshotTime, Clock) of
-               true ->
-                   %% No need to wait
-                   {ok, VecSnapshotTime};
-               false ->
-                   %% wait for snapshot time to catch up with Client Clock
-                   timer:sleep(10),
-                   wait_for_clock(Clock)
-           end
-  end.
+    {ok, VecSnapshotTime} = get_snapshot_time(),
+    case vectorclock:ge(VecSnapshotTime, Clock) of
+	true ->
+	    %% No need to wait
+	    {ok, VecSnapshotTime};
+	false ->
+	    %% wait for snapshot time to catch up with Client Clock
+	    timer:sleep(10),
+	    wait_for_clock(Clock)
+    end.
 
 
 -ifdef(TEST).
