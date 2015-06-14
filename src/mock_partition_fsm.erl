@@ -46,6 +46,7 @@
         set_clock_of_dc/3,
         get_preflist_from_key/1,
         read_data_item/4,
+        async_read_data_item/4,
         generate_downstream_op/5,
         update_data_item/5,
         prepare/2,
@@ -123,6 +124,10 @@ generate_downstream_op(_Transaction, _IndexNode, Key, _Type, _Param) ->
 update_data_item(FsmRef, _Transaction, Key, _Type, _DownstreamRecord) ->
     gen_fsm:sync_send_event(FsmRef, {update_data_item, Key}).
 
+async_read_data_item(FsmRef, _Transaction, Key, _Type) ->
+    Self = self(),
+    gen_fsm:send_event(FsmRef, {async_read_data_item, Key, Self}).
+
 single_commit([{Node,WriteSet}], TxId) ->
     Self = self(),
     gen_fsm:send_event(Node, {single_commit, {Self, TxId, WriteSet}}).
@@ -149,6 +154,11 @@ execute_op({update_data_item, Key}, _From, State) ->
                     ok
             end,
     {reply, Result, execute_op, State#state{key=Key}}.
+
+execute_op({async_read_data_item, Key, From}, State) ->
+    {ok,Value} = read_data_item(nothig, no, Key, no),
+    gen_fsm:send_event(From, {result, Value}),
+    {next_state, execute_op, State#state{key=Key}};
 
 execute_op({prepare,From, [{Key, _, _}]}, State) ->
     Result = case Key of 

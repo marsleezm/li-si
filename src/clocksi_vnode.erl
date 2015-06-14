@@ -72,7 +72,7 @@ start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
 
 %% @doc Sends a read request to the Node that is responsible for the Key
-read_data_item(Node, TxId, Key, Type) ->
+read_data_item(Node, Key, Type, TxId) ->
     case clocksi_readitem_fsm:read_data_item(Node,Key,Type,TxId) of
         {ok, Snapshot} ->
 	        {ok, Snapshot};

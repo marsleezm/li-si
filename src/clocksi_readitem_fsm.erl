@@ -43,6 +43,7 @@
 
 %% States
 -export([read_data_item/4,
+        async_read_data_item/4,
 	 start_read_servers/1,
 	 stop_read_servers/1]).
 
@@ -81,6 +82,15 @@ read_data_item({Partition,Node},Key,Type,Transaction) ->
             {error, Reason}
     end.
 
+async_read_data_item({Partition,Node},Key,Type,Transaction) ->
+    try
+	gen_server:cast({global,generate_random_server_name(Node,Partition)},
+			{perform_read_cast, self(), Key, Type, Transaction})
+    catch
+        _:Reason ->
+            lager:error("Exception caught: ~p", [Reason]),
+            {error, Reason}
+    end.
 
 check_servers_ready() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
