@@ -96,7 +96,7 @@ abort(_UpdatedPartitions, _Transactions) ->
 
 
 %% Functions that will return different value depending on Key.
-read_data_item(_IndexNode, _Transaction, Key, _Type) ->
+read_data_item(_IndexNode, Key, _Type, _Transaction) ->
     case Key of 
         read_fail ->
             {error, mock_read_fail};
@@ -104,13 +104,13 @@ read_data_item(_IndexNode, _Transaction, Key, _Type) ->
             Counter = riak_dt_gcounter:new(),
             {ok, Counter1} = riak_dt_gcounter:update(increment, haha, Counter),
             {ok, Counter2} = riak_dt_gcounter:update(increment, nono, Counter1),
-            {ok, Counter2};
+            {ok, {riak_dt_gcounter,Counter2}};
         set ->
             Set = riak_dt_gset:new(),
             {ok, Set1} = riak_dt_gset:update({add, a}, haha, Set),
-            {ok, Set1}; 
+            {ok, {riak_dt_gset,Set1}}; 
         _ ->
-            {ok, mock_value}
+            {ok, {mock_partition_fsm,mock_value}}
     end.
 
 generate_downstream_op(_Transaction, _IndexNode, Key, _Type, _Param) ->
@@ -124,7 +124,7 @@ generate_downstream_op(_Transaction, _IndexNode, Key, _Type, _Param) ->
 update_data_item(FsmRef, _Transaction, Key, _Type, _DownstreamRecord) ->
     gen_fsm:sync_send_event(FsmRef, {update_data_item, Key}).
 
-async_read_data_item(FsmRef, _Transaction, Key, _Type) ->
+async_read_data_item(FsmRef, Key, _Type, _Transaction) ->
     Self = self(),
     gen_fsm:send_event(FsmRef, {async_read_data_item, Key, Self}).
 
@@ -157,7 +157,7 @@ execute_op({update_data_item, Key}, _From, State) ->
 
 execute_op({async_read_data_item, Key, From}, State) ->
     {ok,Value} = read_data_item(nothig, no, Key, no),
-    gen_fsm:send_event(From, {result, Value}),
+    gen_fsm:send_event(From, {ok, Value}),
     {next_state, execute_op, State#state{key=Key}};
 
 execute_op({prepare,From, [{Key, _, _}]}, State) ->

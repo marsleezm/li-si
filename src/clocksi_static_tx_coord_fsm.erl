@@ -1,4 +1,4 @@
-%% -------------------------------------------------------------------
+
 %%
 %% Copyright (c) 2014 SyncFree Consortium.  All Rights Reserved.
 %%
@@ -88,7 +88,7 @@
 	  prepare_time :: non_neg_integer(),
 	  commit_time :: non_neg_integer(),
       updated_partitions :: dict(),
-      read_set :: dict(),
+      read_set :: [term()],
 	  state :: active | prepared | committing | committed | undefined | aborted}).
 
 %%%===================================================================
@@ -112,14 +112,17 @@ init([From, ClientClock, Operations]) ->
     {Transaction,_TransactionId} = create_transaction_record(ClientClock),
     SD = #state{
             transaction = Transaction,
-            read_set = dict:new(),
+            read_set = [],
             prepare_time = 0,
+            num_to_read=0,
+            num_to_ack=0,
             operations = Operations,
+            updated_partitions = dict:new(),
             from = From
            },
     {ok, execute_batch_ops, SD, 0}.
 
--spec create_transaction_record(snapshot_time()) -> {txid(),tx()}.
+-spec create_transaction_record(snapshot_time() | ignore) -> {tx(),txid()}.
 create_transaction_record(ClientClock) ->
     %% Seed the random because you pick a random read server, this is stored in the process state
     {A1,A2,A3} = now(),
@@ -150,7 +153,8 @@ execute_batch_ops(timeout, SD=#state{
                         {read, Key, Type} ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
-                            ?CLOCKSI_VNODE:async_read_data_item(IndexNode, Key, Type, Transaction),
+                            lager:info("NumToRead count: ~w",[NumToRead+1]),
+                            ok = ?CLOCKSI_VNODE:async_read_data_item(IndexNode, Key, Type, Transaction),
                             {UpdatedPartitions, NumToRead+1};
                         {update, Key, Type, Op} ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
@@ -167,11 +171,19 @@ execute_batch_ops(timeout, SD=#state{
                     end
                 end,
     {WriteSet, NumOfReads} = lists:foldl(ProcessOp, {dict:new(),0}, Operations),
+    lager:info("Operations are ~w, WriteSet is ~w, NumOfReads ~w",[Operations, WriteSet, NumOfReads]),
     case dict:size(WriteSet) of
         0->
-            Snapshot_time=Transaction#transaction.snapshot_time,
-            {next_state, committing,
-            SD#state{state=committing, commit_time=Snapshot_time, num_to_read=NumOfReads}, 0};
+            case NumOfReads of
+                0 ->
+                    reply_to_client(SD#state{state=committed, 
+                            commit_time=clocksi_vnode:now_microsec(erlang:now())});
+                _ ->
+                    lager:info("Waiting for ~w reads to reply", [NumOfReads]),
+                    Snapshot_time=Transaction#transaction.snapshot_time,
+                    {next_state, single_committing, SD#state{state=committing, num_to_ack=0, 
+                        commit_time=Snapshot_time, num_to_read=NumOfReads}}
+            end;
         1->
             UpdatedPart = dict:to_list(WriteSet),
             %lists:foldl(fun(X, Acc) -> {Part, K:eys}= X,
@@ -182,8 +194,8 @@ execute_batch_ops(timeout, SD=#state{
             SD#state{state=committing, num_to_ack=1, num_to_read=NumOfReads}};
         N->
             ?CLOCKSI_VNODE:prepare(WriteSet, Transaction),
-            {next_state, receive_prepared,
-            SD#state{num_to_ack=N, state=prepared, num_to_read=NumOfReads}}
+            {next_state, receive_prepared, SD#state{num_to_ack=N, state=prepared, 
+                num_to_read=NumOfReads, updated_partitions=WriteSet}}
     end.
     %{next_state, prepare, SD#state{read_set=ReadSet, updated_partitions=UpdatedPartitions}, 0}
 
@@ -192,27 +204,38 @@ execute_batch_ops(timeout, SD=#state{
 %%      of the received prepare_time).
 receive_prepared({prepared, ReceivedPrepareTime},
                  S0=#state{num_to_ack=NumToAck,
+                           num_to_read=NumToRead,
                            prepare_time=PrepareTime}) ->
-    io:format("Received prepared"),
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     case NumToAck of 
         1 ->
-            {next_state, committing,
-             S0#state{prepare_time=MaxPrepareTime, commit_time=MaxPrepareTime, state=committing}, 0};
+            case NumToRead of
+                0 ->
+                    {next_state, committing, S0#state{prepare_time=MaxPrepareTime, 
+                        commit_time=MaxPrepareTime, state=committing}, 0};
+                _ ->
+                    {next_state, receive_prepared, S0#state{num_to_ack= NumToAck-1, 
+                        commit_time=MaxPrepareTime, prepare_time=MaxPrepareTime}}
+            end;
         _ ->
             {next_state, receive_prepared,
              S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime}}
     end;
 
-receive_prepared({result, Value},
+receive_prepared({ok, {Type,Snapshot}},
                  S0=#state{num_to_read=NumToRead,
                             read_set=ReadSet,
                             num_to_ack=NumToAck}) ->
-    ReadSet1 = ReadSet ++ [Value],
-    case NumToAck of 
+    ReadSet1 = ReadSet ++ [Type:value(Snapshot)],
+    case NumToRead of 
         1 ->
-            {next_state, committing,
-             S0#state{read_set=ReadSet1, num_to_read = NumToRead-1, state=committing}, 0};
+            case NumToAck of
+                0 ->
+                    {next_state, committing, S0#state{state=committing, read_set=ReadSet1}, 0};
+                _ ->
+                    {next_state, receive_prepared, S0#state{num_to_read= NumToRead-1,
+                            read_set=ReadSet1}}
+            end;
         _ ->
             {next_state, receive_prepared,
              S0#state{read_set=ReadSet1, num_to_read = NumToRead-1}}
@@ -224,12 +247,12 @@ receive_prepared(abort, S0) ->
 receive_prepared(timeout, S0) ->
     {next_state, abort, S0, 0}.
 
-single_committing({result, Value},
+single_committing({ok, {Type, Snapshot}},
                  S0=#state{num_to_read=NumToRead,
                             read_set=ReadSet,
-                            state=committed,
                             num_to_ack=NumToAck}) ->
-    ReadSet1 = ReadSet ++ [Value],
+    lager:info("Got some replies ~w", [Type:value(Snapshot)]),
+    ReadSet1 = ReadSet ++ [Type:value(Snapshot)],
     case NumToRead of 
         1 ->
             case NumToAck of
@@ -248,7 +271,8 @@ single_committing({committed, CommitTime}, S0=#state{from=_From, num_to_read=Num
         0 ->
             reply_to_client(S0#state{prepare_time=CommitTime, commit_time=CommitTime, state=committed});
         _ ->
-            {next_state, single_committing, S0#state{num_to_ack=0}}
+            {next_state, single_committing, S0#state{num_to_ack=0, prepare_time=CommitTime,
+                        commit_time=CommitTime}}
     end;
     
 single_committing(aborted, S0=#state{from=_From}) ->
@@ -263,8 +287,10 @@ committing(timeout, SD0=#state{transaction = Transaction,
                               commit_time=Commit_time}) ->
     case dict:size(UpdatedPartitions) of
         0 ->
+            lager:info("Replying directly"),
             reply_to_client(SD0#state{state=committed});
         N ->
+            lager:info("Committing"),
             ?CLOCKSI_VNODE:commit(UpdatedPartitions, Transaction, Commit_time),
             {next_state, receive_committed,
              SD0#state{num_to_ack=N, state=committing}}
@@ -297,6 +323,11 @@ abort(abort, SD0=#state{transaction = Transaction,
     reply_to_client(SD0#state{state=aborted});
 
 abort({prepared, _}, SD0=#state{transaction=Transaction,
+                        updated_partitions=UpdatedPartitions}) ->
+    ?CLOCKSI_VNODE:abort(UpdatedPartitions, Transaction),
+    reply_to_client(SD0#state{state=aborted});
+
+abort({ok, _}, SD0=#state{transaction=Transaction,
                         updated_partitions=UpdatedPartitions}) ->
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, Transaction),
     reply_to_client(SD0#state{state=aborted}).

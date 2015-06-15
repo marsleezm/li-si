@@ -154,7 +154,7 @@ perform_singleitem_read(Key,Type) ->
 	    {error, unknown};
 	{error, Reason} ->
 	    {error, Reason};
-	{ok, Snapshot} ->
+	{ok, {Type, Snapshot}} ->
 	    ReadResult = Type:value(Snapshot),
 	    {ok, ReadResult}
     end.
@@ -172,8 +172,10 @@ execute_op({Op_type, Args}, Sender,
         prepare ->
             case Args of
             two_phase ->
+                lager:info("Received prepare.. Two-phase prepare"),
                 {next_state, prepare_2pc, SD0#state{from=Sender, commit_protocol=Args}, 0};
             _ ->
+                lager:info("Received prepare.. Normal prepare"),
                 {next_state, prepare, SD0#state{from=Sender, commit_protocol=Args}, 0}
             end;
         read ->
@@ -182,17 +184,17 @@ execute_op({Op_type, Args}, Sender,
                         error ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
-                            lager:info("Read from node..."),
-                            ?CLOCKSI_VNODE:read_data_item(IndexNode, Transaction, Key, Type); 
+                            lager:info("Read from node for ~w", [Key]),
+                            ?CLOCKSI_VNODE:read_data_item(IndexNode, Key, Type, Transaction); 
                         {ok, SnapshotState} ->
-                            {ok, SnapshotState}
+                            {ok, {Type,SnapshotState}}
                     end,
             case Reply of
                 error ->
                     {reply, {error, unknown}, abort, SD0, 0};
                 {error, Reason} ->
                     {reply, {error, Reason}, abort, SD0, 0};
-                {ok, Snapshot} ->
+                {ok, {Type, Snapshot}} ->
                     ReadSet1 = dict:store(Key, Snapshot, ReadSet),
                     lager:info("Output ~w", [Snapshot]), 
                     {reply, {ok, Type:value(Snapshot)}, execute_op, SD0#state{read_set=ReadSet1}}

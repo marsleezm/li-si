@@ -29,13 +29,12 @@
 -spec generate_downstream_op(Transaction::tx(), Node::term(), Key::key(),
                              Type::type(), Update::op(), list()) ->
                                     {ok, op()} | {error, atom()}.
-generate_downstream_op(Transaction, Node, Key, Type, Update, WriteSet) ->
+generate_downstream_op(Transaction, Node, Key, Type, Update, _WriteSet) ->
     {Op, Actor} =  Update,
     case clocksi_vnode:read_data_item(Node,
-                                      Transaction,
                                       Key,
                                       Type,
-				      WriteSet) of
+                                      Transaction) of
         {ok, Snapshot} ->
             DownstreamOp = case Type of
                             crdt_bcounter ->
