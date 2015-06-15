@@ -17,10 +17,13 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(clocksi_test).
+-module(certification_test).
 
 -export([confirm/0, 
          clocksi_test_certification_check/1,
+         clocksi_pending_prepare_abort_check/1,
+         clocksi_pending_prepare_wait_check/1,
+         spawn_prepare/3,
          clocksi_multiple_test_certification_check/1]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -30,6 +33,8 @@ confirm() ->
     [Nodes] = rt:build_clusters([3]),
     lager:info("Nodes: ~p", [Nodes]),
     clocksi_test_certification_check(Nodes),
+    clocksi_pending_prepare_abort_check(Nodes),
+    clocksi_pending_prepare_wait_check(Nodes),
     clocksi_multiple_test_certification_check(Nodes),
     rt:clean_cluster(Nodes),
     pass.
@@ -77,6 +82,103 @@ clocksi_test_certification_check(Nodes) ->
     lager:info("Tx1 sent prepare, got message: ~p", [CommitTime]),
     lager:info("Tx1 aborted. Test passed!"),
     pass.
+
+%% @doc The following function tests the certification check algorithm,
+%%  A transaction with snapshot time smaller than the prepare time of
+%%  another transaction will abrot immediately.
+clocksi_pending_prepare_abort_check(Nodes) ->
+    lager:info("clockSI_pending_prepare_check started"),
+    FirstNode = hd(Nodes),
+    LastNode= lists:last(Nodes),
+    lager:info("Node1: ~p", [FirstNode]),
+    lager:info("LastNode: ~p", [LastNode]),
+    Type = riak_dt_pncounter,
+    %% Start a new tx,  perform an update over key write.
+    {ok,TxId}=rpc:call(FirstNode, antidote, clocksi_istart_tx, []),
+    lager:info("Tx1 Started, id : ~p", [TxId]),
+    WriteResult=rpc:call(FirstNode, antidote, clocksi_iupdate,
+                         [TxId, write, Type, {increment, 1}]),
+    lager:info("Tx1 Writing..."),
+    ?assertEqual(ok, WriteResult),
+
+    %% Start a new tx,  perform an update over key write.
+    {ok,TxId1}=rpc:call(LastNode, antidote, clocksi_istart_tx, []),
+    lager:info("Tx2 Started, id : ~p", [TxId1]),
+    WriteResult1=rpc:call(LastNode, antidote, clocksi_iupdate,
+                          [TxId1, write, Type, {increment, 2}]),
+    lager:info("Tx2 Writing..."),
+    ?assertEqual(ok, WriteResult1),
+    lager:info("Tx1 finished concurrent write..."),
+
+    %% prepare the first transaction.
+    CommitTime=rpc:call(LastNode, antidote, clocksi_iprepare, [TxId]),
+    ?assertMatch({ok, _}, CommitTime),
+
+    %% Prepare the second transaction, which should be aborted.
+    Result=rpc:call(FirstNode, antidote, clocksi_iprepare, [TxId1]),
+    ?assertMatch({aborted, TxId1}, Result),
+
+    End1=rpc:call(LastNode, antidote, clocksi_icommit, [TxId]),
+    ?assertMatch({ok, _}, End1),
+    lager:info("Tx1 Committed."),
+    lager:info("Tx1 aborted. Test passed!"),
+    pass.
+
+%% @doc The following function tests the certification check algorithm,
+%%  A transaction with snapshot time larger than the prepare time of 
+%%  another transaction will wait until the previous one commit.
+clocksi_pending_prepare_wait_check(Nodes) ->
+    lager:info("clockSI_pending_prepare_check started"),
+    FirstNode = hd(Nodes),
+    LastNode= lists:last(Nodes),
+    lager:info("Node1: ~p", [FirstNode]),
+    lager:info("LastNode: ~p", [LastNode]),
+    Type = riak_dt_pncounter,
+    %% Start a new tx,  perform an update over key write.
+    {ok,TxId}=rpc:call(FirstNode, antidote, clocksi_istart_tx, []),
+    lager:info("Tx1 Started, id : ~p", [TxId]),
+    WriteResult=rpc:call(FirstNode, antidote, clocksi_iupdate,
+                         [TxId, write, Type, {increment, 1}]),
+    lager:info("Tx1 Writing..."),
+    ?assertEqual(ok, WriteResult),
+
+    %% prepare the first transaction.
+    CommitTime=rpc:call(LastNode, antidote, clocksi_iprepare, [TxId]),
+    ?assertMatch({ok, _}, CommitTime),
+
+    %% Start a new tx after .
+    {ok,TxId1}=rpc:call(LastNode, antidote, clocksi_istart_tx, []),
+    lager:info("Tx2 Started, id : ~p", [TxId1]),
+    WriteResult1=rpc:call(LastNode, antidote, clocksi_iupdate,
+                          [TxId1, write, Type, {increment, 2}]),
+    lager:info("Tx2 Writing..."),
+    ?assertEqual(ok, WriteResult1),
+
+    spawn(certification_test, spawn_prepare, [LastNode, TxId1, self()]),    
+
+    timer:sleep(200),
+    End1=rpc:call(LastNode, antidote, clocksi_icommit, [TxId]),
+    ?assertMatch({ok, _}, End1),
+    lager:info("Tx1 successfully committed!"),
+    
+    receive
+        {_Pid, PrepareResult} ->
+            %%receive the read value
+            ?assertMatch({ok, _}, PrepareResult),
+            lager:info("Tx2 successfully prepared!"),
+            End1=rpc:call(LastNode, antidote, clocksi_icommit, [TxId1]),
+            ?assertMatch({ok, _}, End1)
+    end,
+
+    lager:info("Test passed!"),
+    pass.
+
+spawn_prepare(Node, TxId, Return) ->
+    %% Prepare the second transaction, which should be aborted.
+    Result=rpc:call(Node, antidote, clocksi_iprepare, [TxId]),
+    lager:info("Prepare got result ~w",[Result]),
+    Return ! {self(), Result}.
+
 
 %% @doc The following function tests the certification check algorithm.
 %%      when two concurrent txs modify a single object, one hast to abort.
