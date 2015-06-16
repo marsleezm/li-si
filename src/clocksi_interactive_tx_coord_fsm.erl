@@ -172,10 +172,10 @@ execute_op({Op_type, Args}, Sender,
         prepare ->
             case Args of
             two_phase ->
-                lager:info("Received prepare.. Two-phase prepare"),
+                %lager:info("Received prepare.. Two-phase prepare"),
                 {next_state, prepare_2pc, SD0#state{from=Sender, commit_protocol=Args}, 0};
             _ ->
-                lager:info("Received prepare.. Normal prepare"),
+                %lager:info("Received prepare.. Normal prepare"),
                 {next_state, prepare, SD0#state{from=Sender, commit_protocol=Args}, 0}
             end;
         read ->
@@ -184,7 +184,7 @@ execute_op({Op_type, Args}, Sender,
                         error ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
-                            lager:info("Read from node for ~w", [Key]),
+                            %lager:info("Read from node for ~w", [Key]),
                             ?CLOCKSI_VNODE:read_data_item(IndexNode, Key, Type, Transaction); 
                         {ok, SnapshotState} ->
                             {ok, {Type,SnapshotState}}
@@ -196,7 +196,7 @@ execute_op({Op_type, Args}, Sender,
                     {reply, {error, Reason}, abort, SD0, 0};
                 {ok, {Type, Snapshot}} ->
                     ReadSet1 = dict:store(Key, Snapshot, ReadSet),
-                    lager:info("Output ~w", [Snapshot]), 
+                    %lager:info("Output ~w", [Snapshot]), 
                     {reply, {ok, Type:value(Snapshot)}, execute_op, SD0#state{read_set=ReadSet1}}
             end;
         update ->
@@ -301,7 +301,7 @@ receive_prepared(timeout, S0) ->
 single_committing({committed, CommitTime}, S0=#state{from=_From}) ->
     reply_to_client(S0#state{prepare_time=CommitTime, commit_time=CommitTime, state=committed});
     
-single_committing(aborted, S0=#state{from=_From}) ->
+single_committing(abort, S0=#state{from=_From}) ->
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc after receiving all prepare_times, send the commit message to all

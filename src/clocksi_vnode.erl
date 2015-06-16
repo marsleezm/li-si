@@ -27,8 +27,11 @@
 	 read_data_item/4,
 	 async_read_data_item/4,
 	 get_cache_name/2,
+         check_prepared/3,
          prepare/2,
          commit/3,
+         reset_prepared/5,
+         async_send_msg/2,
          single_commit/2,
          abort/2,
          now_microsec/1,
@@ -201,16 +204,19 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
             gen_fsm:send_event(OriginalSender, {prepared, NewPrepare}),
             {noreply,  State};
         {error, wait_more} ->
-            riak_core_vnode_master:command({Partition,node()}, {prepare, Transaction,
-             WriteSet, OriginalSender}, {Partition, node()}, ?CLOCKSI_MASTER),
+            spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
+                        WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, no_updates} ->
             gen_fsm:send_event(OriginalSender, {error, no_tx_record}),
-            {reply, {error, no_tx_record}, State};
+            {noreply, State};
         {error, write_conflict} ->
             gen_fsm:send_event(OriginalSender, abort),
-            {reply, abort, State}
+            {noreply, State}
     end;
+
+
+    
 
 handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
@@ -234,8 +240,8 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                     {noreply, State}
             end;
         {error, wait_more}->
-            riak_core_vnode_master:command({Partition,node()}, {single_commit, Transaction,
-             WriteSet, OriginalSender}, {Partition, node()}, ?CLOCKSI_MASTER),
+            spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
+                        WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, no_updates} ->
             gen_fsm:send_event(OriginalSender, {error, no_tx_record}),
@@ -252,7 +258,7 @@ handle_command({commit, Transaction, TxCommitTime, Updates}, _Sender,
                #state{partition=_Partition,
                       committed_tx=CommittedTx
                       } = State) ->
-    lager:info("Commting in vnode"),
+    %%lager:info("Commting in vnode"),
     Result = commit(Transaction, TxCommitTime, Updates, CommittedTx, State),
     case Result of
         {ok, {committed,NewCommittedTx}} ->
@@ -269,18 +275,19 @@ handle_command({abort, Transaction, Updates}, _Sender,
                #state{partition=_Partition} = State) ->
     TxId = Transaction#transaction.txn_id,
     case Updates of
-    [{Key, _Value} | _Rest] -> 
+        [_Something] -> 
             %LogId = log_utilities:get_logid_from_key(Key),
             %[Node] = log_utilities:get_preflist_from_key(Key),
             %Result = logging_vnode:append(Node,LogId,{TxId, aborted}),
             %case Result of
             %    {ok, _} ->
-                    clean_and_notify(TxId, Key, State),
+                    %lager:info("Trying to abort ~w with updates ~w", [TxId, Updates]),
+                    clean_and_notify(TxId, Updates, State),
             %    {error, timeout} ->
             %        clean_and_notify(TxId, Key, State)
             %end,
             {reply, ack_abort, State};
-        _ ->
+        [] ->
             {reply, {error, no_tx_record}, State}
     end;
 
@@ -337,11 +344,14 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
+async_send_msg(Msg, To) ->
+    SleepTime = random:uniform(150)+50,
+    timer:sleep(SleepTime),
+    riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
 prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime)->
     TxId = Transaction#transaction.txn_id,
-    SnapshotTime = TxId#tx_id.snapshot_time,
-    case certification_check(SnapshotTime, TxWriteSet, CommittedTx, PreparedTx) of
+    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTx) of
         true ->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
@@ -398,8 +408,7 @@ commit(Transaction, TxCommitTime, Updates, CommittedTx,
             %[Node] = log_utilities:get_preflist_from_key(Key),
             %case logging_vnode:append(Node,LogId,LogRecord) of
             %    {ok, _} ->
-                    %lager:info("Trying to store"),
-                    lager:info("Committing ops ~w",[Updates]),
+                    %lager:info("Committing ops ~w",[Updates]),
                     update_store(Updates, Transaction, TxCommitTime, InMemoryStore),
                     NewDict = dict:store(Key, TxCommitTime, CommittedTx),
                     clean_and_notify(TxId,Updates,State),
@@ -430,17 +439,20 @@ clean_and_notify(TxId, Updates, #state{
 clean_prepared(_PreparedTx,[],_TxId) ->
     ok;
 clean_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId) ->
-    [{Key,ActiveTxs}] = ets:lookup(PreparedTx, Key),
-    NewActive = lists:keydelete(TxId,1,ActiveTxs),
-    case NewActive of
+    case ets:lookup(PreparedTx, Key) of
+        [{Key, ActiveTxs}] ->
+            case ActiveTxs of
+                [_Prepared] ->
+                    true = ets:delete(PreparedTx, Key);
+                _ ->
+                    NewActive = lists:keydelete(TxId,1,ActiveTxs),
+                    true = ets:insert(PreparedTx, {Key, NewActive})
+            end;
         [] ->
-            true = ets:delete(PreparedTx, Key);
-        _ ->
-            true = ets:insert(PreparedTx, {Key, NewActive})
-    end,
-    lager:info("Prepared transaction now is ~w", [NewActive]),
+            ok
+    end,   
+    %lager:info("Prepared transaction now is ~w", [NewActive]),
     clean_prepared(PreparedTx,Rest,TxId).
-
 
 %% @doc converts a tuple {MegaSecs,Secs,MicroSecs} into microseconds
 now_microsec({MegaSecs, Secs, MicroSecs}) ->
@@ -448,11 +460,12 @@ now_microsec({MegaSecs, Secs, MicroSecs}) ->
 
 %% @doc Performs a certification check when a transaction wants to move
 %%      to the prepared state.
-%certification_check(_TxId, _H, _CommittedTx, PreparedTx) ->
+%certification_check(_TxId, _H, _CommittedTx, _PreparedTx) ->
 %    true.
 certification_check(_, [], _, _) ->
     true;
-certification_check(SnapshotTime, [H|T], CommittedTx, PreparedTx) ->
+certification_check(TxId, [H|T], CommittedTx, PreparedTx) ->
+    SnapshotTime = TxId#tx_id.snapshot_time,
     {Key, _Type, _} = H,
     case dict:find(Key, CommittedTx) of
         {ok, CommitTime} ->
@@ -460,9 +473,9 @@ certification_check(SnapshotTime, [H|T], CommittedTx, PreparedTx) ->
                 true ->
                     false;
                 false ->
-                    case check_prepared(SnapshotTime, PreparedTx, Key) of
+                    case check_prepared(TxId, PreparedTx, Key) of
                         true ->
-                            certification_check(SnapshotTime, T, CommittedTx, PreparedTx);
+                            certification_check(TxId, T, CommittedTx, PreparedTx);
                         false ->
                             false;
                         wait ->
@@ -470,9 +483,9 @@ certification_check(SnapshotTime, [H|T], CommittedTx, PreparedTx) ->
                     end
             end;
         error ->
-            case check_prepared(SnapshotTime, PreparedTx, Key) of
+            case check_prepared(TxId, PreparedTx, Key) of
                 true ->
-                    certification_check(SnapshotTime, T, CommittedTx, PreparedTx); 
+                    certification_check(TxId, T, CommittedTx, PreparedTx); 
                 false ->
                     false;
                 wait ->
@@ -480,17 +493,24 @@ certification_check(SnapshotTime, [H|T], CommittedTx, PreparedTx) ->
             end
     end.
 
-check_prepared(SnapshotTime, PreparedTx, Key) ->
+check_prepared(TxId, PreparedTx, Key) ->
+    SnapshotTime = TxId#tx_id.snapshot_time,
     case ets:lookup(PreparedTx, Key) of
         [] ->
             true;
         [{Key, List}] ->
-            {_TxId, PrepareTime} = lists:last(List),
+            [{_TxId1, PrepareTime}|_] = List,
             case PrepareTime > SnapshotTime of
                 true ->
+                    %lager:info("Has to abort for Key ~w", [Key]),
                     false;
                 false ->
-                    wait  
+                    case random:uniform(2) of
+                        1 ->
+                            false;
+                        2 ->
+                            wait  
+                    end
             end
     end.
 
@@ -523,7 +543,7 @@ update_store([{Key, Type, {Param, Actor}}|Rest], Transaction, TxCommitTime, InMe
      %       lager:info("Wrote ~w to key ~w",[Value, Key]),
             Init = Type:new(),
             {ok, NewSnapshot} = Type:update(Param, Actor, Init),
-            lager:info("Updateing store for key ~w, value ~w firstly", [Key, Type:value(NewSnapshot)]),
+            %lager:info("Updateing store for key ~w, value ~w firstly", [Key, Type:value(NewSnapshot)]),
             true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]}), 
             update_store(Rest, Transaction, TxCommitTime, InMemoryStore);
         [{Key, ValueList}] ->
@@ -531,7 +551,7 @@ update_store([{Key, Type, {Param, Actor}}|Rest], Transaction, TxCommitTime, InMe
             {RemainList, _} = lists:split(min(20,length(ValueList)), ValueList),
             [{_CommitTime, First}|_] = RemainList,
             {ok, NewSnapshot} = Type:update(Param, Actor, First),
-            lager:info("Updateing store for key ~w, value ~w", [Key, Type:value(NewSnapshot)]),
+            %lager:info("Updateing store for key ~w, value ~w", [Key, Type:value(NewSnapshot)]),
             true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]}),
             update_store(Rest, Transaction, TxCommitTime, InMemoryStore)
     end,

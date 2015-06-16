@@ -177,7 +177,7 @@ execute_op({single_commit, {From, _TxId, WriteSet}}, State) ->
     [{Key, _, _}] = WriteSet,
     Result = case Key of 
                 success -> {committed, 10};
-                _ -> aborted 
+                _ -> abort 
             end,
     gen_fsm:send_event(From, Result),
     {stop, normal, State}.

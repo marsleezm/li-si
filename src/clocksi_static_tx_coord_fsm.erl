@@ -153,7 +153,7 @@ execute_batch_ops(timeout, SD=#state{
                         {read, Key, Type} ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
-                            lager:info("NumToRead count: ~w",[NumToRead+1]),
+                            %%lager:info("NumToRead count: ~w",[NumToRead+1]),
                             ok = ?CLOCKSI_VNODE:async_read_data_item(IndexNode, Key, Type, Transaction),
                             {UpdatedPartitions, NumToRead+1};
                         {update, Key, Type, Op} ->
@@ -171,7 +171,7 @@ execute_batch_ops(timeout, SD=#state{
                     end
                 end,
     {WriteSet, NumOfReads} = lists:foldl(ProcessOp, {dict:new(),0}, Operations),
-    lager:info("Operations are ~w, WriteSet is ~w, NumOfReads ~w",[Operations, WriteSet, NumOfReads]),
+    %%lager:info("Operations are ~w, WriteSet is ~w, NumOfReads ~w",[Operations, WriteSet, NumOfReads]),
     case dict:size(WriteSet) of
         0->
             case NumOfReads of
@@ -179,7 +179,7 @@ execute_batch_ops(timeout, SD=#state{
                     reply_to_client(SD#state{state=committed, 
                             commit_time=clocksi_vnode:now_microsec(erlang:now())});
                 _ ->
-                    lager:info("Waiting for ~w reads to reply", [NumOfReads]),
+                    %%lager:info("Waiting for ~w reads to reply", [NumOfReads]),
                     Snapshot_time=Transaction#transaction.snapshot_time,
                     {next_state, single_committing, SD#state{state=committing, num_to_ack=0, 
                         commit_time=Snapshot_time, num_to_read=NumOfReads}}
@@ -251,7 +251,7 @@ single_committing({ok, {Type, Snapshot}},
                  S0=#state{num_to_read=NumToRead,
                             read_set=ReadSet,
                             num_to_ack=NumToAck}) ->
-    lager:info("Got some replies ~w", [Type:value(Snapshot)]),
+    %%lager:info("Got some replies ~w", [Type:value(Snapshot)]),
     ReadSet1 = ReadSet ++ [Type:value(Snapshot)],
     case NumToRead of 
         1 ->
@@ -275,7 +275,7 @@ single_committing({committed, CommitTime}, S0=#state{from=_From, num_to_read=Num
                         commit_time=CommitTime}}
     end;
     
-single_committing(aborted, S0=#state{from=_From}) ->
+single_committing(abort, S0=#state{from=_From}) ->
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc after receiving all prepare_times, send the commit message to all
@@ -287,10 +287,10 @@ committing(timeout, SD0=#state{transaction = Transaction,
                               commit_time=Commit_time}) ->
     case dict:size(UpdatedPartitions) of
         0 ->
-            lager:info("Replying directly"),
+            %%lager:info("Replying directly"),
             reply_to_client(SD0#state{state=committed});
         N ->
-            lager:info("Committing"),
+            %%lager:info("Committing"),
             ?CLOCKSI_VNODE:commit(UpdatedPartitions, Transaction, Commit_time),
             {next_state, receive_committed,
              SD0#state{num_to_ack=N, state=committing}}
