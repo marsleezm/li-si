@@ -171,7 +171,7 @@ execute_batch_ops(timeout, SD=#state{
                     end
                 end,
     {WriteSet, NumOfReads} = lists:foldl(ProcessOp, {dict:new(),0}, Operations),
-    %%lager:info("Operations are ~w, WriteSet is ~w, NumOfReads ~w",[Operations, WriteSet, NumOfReads]),
+    %lager:info("Operations are ~w, WriteSet is ~w, NumOfReads ~w",[Operations, WriteSet, NumOfReads]),
     case dict:size(WriteSet) of
         0->
             case NumOfReads of

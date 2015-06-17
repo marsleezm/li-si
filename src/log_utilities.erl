@@ -27,6 +27,8 @@
 
 
 -export([get_preflist_from_key/1,
+         get_my_next/2,
+         get_my_previous/2,
          get_logid_from_key/1,
          remove_node_from_preflist/1,
          get_my_node/1
@@ -65,6 +67,21 @@ get_primaries_preflist(Key)->
     PartitionList = chashbin:to_list(CHBin),
     Pos = Key rem length(PartitionList) + 1,
     [lists:nth(Pos, PartitionList)].
+
+-spec get_my_previous(chash:index_as_int(), non_neg_integer) -> preflist().
+get_my_previous(Partition, N) ->
+    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
+    Size = chashbin:num_partitions(CHBin),
+    Itr = chashbin:iterator(Partition, CHBin),
+    {Primaries, _} = chashbin:itr_pop(Size-1, Itr),
+    lists:sublist(Primaries, Size-N, N).
+
+-spec get_my_next(chash:index_as_int(), non_neg_integer) -> preflist().
+get_my_next(Partition, N) ->
+    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
+    Itr = chashbin:iterator(Partition, CHBin),
+    {Primaries, _} = chashbin:itr_pop(N, Itr),
+    Primaries.
 
 get_my_node(Partition) ->
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),

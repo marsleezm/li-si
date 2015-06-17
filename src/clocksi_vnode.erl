@@ -28,6 +28,8 @@
 	 async_read_data_item/4,
 	 get_cache_name/2,
          check_prepared/3,
+         replicate_log/3,
+         log_replicated/2,
          prepare/2,
          commit/3,
          reset_prepared/5,
@@ -52,6 +54,8 @@
 
 -ignore_xref([start_vnode/1]).
 
+-define(REP_FACTOR, 3).
+-define(QUORUM, 2).
 %%---------------------------------------------------------------------
 %% @doc Data Type: state
 %%      where:
@@ -65,6 +69,8 @@
 %%----------------------------------------------------------------------
 -record(state, {partition :: non_neg_integer(),
                 prepared_tx :: cache_id(),
+                my_log :: cache_id(),
+                replication_log :: dict(),
                 committed_tx :: dict(),
                 inmemory_store :: cache_id()}).
 
@@ -91,22 +97,34 @@ async_read_data_item(Node, Key, Type, TxId) ->
 
 %% @doc Sends a prepare request to a Node involved in a tx identified by TxId
 prepare(ListofNodes, TxId) ->
-    Self = self(),
+    Self = {fsm, undefined, self()},
     dict:fold(fun(Node,WriteSet,_Acc) ->
 			riak_core_vnode_master:command(Node,
 						       {prepare, TxId,WriteSet, Self},
-						       {fsm, undefined, self()},
+                                Self,
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
 
+replicate_log(ListOfNodes, Log, Master) ->
+    riak_core_vnode_master:command(ListOfNodes,
+                                    {replicate_log, Log, Master},
+                                    {fsm, undefined, self()},
+                                   ?CLOCKSI_MASTER).
+
+log_replicated(Master, Reply) ->
+    riak_core_vnode_master:command(Master,
+                                    {log_replicated, Reply},
+                                    {fsm, undefined, self()},
+                                   ?CLOCKSI_MASTER).
 
 %% @doc Sends prepare+commit to a single partition
 %%      Called by a Tx coordinator when the tx only
 %%      affects one partition
 single_commit([{Node,WriteSet}], TxId) ->
+    Self = {fsm, undefined, self()},
     riak_core_vnode_master:command(Node,
-                                   {single_commit, TxId,WriteSet, self()},
-                                   {fsm, undefined, self()},
+                                   {single_commit, TxId,WriteSet, Self},
+                                   Self,
                                    ?CLOCKSI_MASTER).
 
 %% @doc Sends a commit request to a Node involved in a tx identified by TxId
@@ -138,12 +156,17 @@ init([Partition]) ->
     PreparedTx = open_table(Partition, prepared),
     CommittedTx = dict:new(),
     InMemoryStore = open_table(Partition, inmemory_store),
+    MyLog = open_table(Partition, my_log),
+    Predecessors = log_utilities:get_my_previous(Partition, ?REP_FACTOR-1),
+    ReplicationLog = dict:new(),
+    NewReplicationLog = open_local_tables(Predecessors, ReplicationLog),
     clocksi_readitem_fsm:start_read_servers(Partition),
     {ok, #state{partition=Partition,
                 prepared_tx=PreparedTx,
                 committed_tx=CommittedTx,
+                my_log=MyLog,
+                replication_log=NewReplicationLog,
                 inmemory_store=InMemoryStore}}.
-
 
 
 check_tables_ready() ->
@@ -151,6 +174,8 @@ check_tables_ready() ->
     PartitionList = chashbin:to_list(CHBin),
     check_table_ready(PartitionList).
 
+int_to_atom(Int) ->
+    list_to_atom(integer_to_list(Int)).
 
 check_table_ready([]) ->
     true;
@@ -166,6 +191,20 @@ check_table_ready([{Partition,Node}|Rest]) ->
 	    false
     end.
 
+open_local_tables([], Dict) ->
+    Dict;
+open_local_tables([{Part, Node}|Rest], Dict) ->
+    try
+    Tab = ets:new(int_to_atom(Part),
+            [set,?TABLE_CONCURRENCY]),
+    NewDict = dict:store(Part, Tab, Dict),
+    open_local_tables(Rest, NewDict)
+    catch
+    _:_Reason ->
+        lager:info("Error opening table..."),
+        %% Someone hasn't finished cleaning up yet
+        open_local_tables([{Part, Node}|Rest], Dict)
+    end.
 
 open_table(Partition, Name) ->
     try
@@ -191,27 +230,70 @@ handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
     Result = clocksi_readitem_fsm:check_partition_ready(Node,Partition,?READ_CONCURRENCY),
     {reply, Result, SD0};
 
+handle_command({replicate_log, Log, Master}, _Sender, #state{replication_log=ReplicationLog}=State) ->
+    {Type, {TxId, Record}} = Log,
+    {Index, _Node} = Master,
+    RepTab = dict:fetch(Index, ReplicationLog),
+    true = ets:insert(RepTab, {TxId, Record}),
+    log_replicated(Master, {Type, TxId}), 
+    {noreply, State};
+    %{reply, {log_replicated, {Type, TxId}}, State};
+
+
+handle_command({log_replicated, {Type, TxId}}, _Sender, #state{my_log=MyLog}=State) ->
+    %lager:info("Got reply ~p", [Type]),
+    case ets:lookup(MyLog, TxId) of 
+        [{TxId, {RecordType, AckNeeded, Sender, MsgToReply, Record}}] ->
+            case Type of
+                RecordType ->
+                    case AckNeeded of
+                        1 -> %%Has got all neede ack, can log message already
+                            %lager:info("Returned to client"),
+                            ets:insert(MyLog, {TxId, Record}),
+                            %lager:info("#####DONE#####Sending ~p to ~p", [Sender, MsgToReply]),
+                            riak_core_vnode:reply(Sender, MsgToReply);
+                        _ -> %%Wait for more replies
+                            ets:insert(MyLog, {TxId, {RecordType, AckNeeded-1, 
+                                    Sender, MsgToReply, Record}})
+                    end;
+                _ ->
+                    ok
+            end;
+        [_SomeRecord] -> %%The record is appended already, do nothing
+            %lager:info("No need to do anything ~p", [_SomeRecord]),
+            ok
+    end,
+    {noreply, State};
+    
+
 handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               committed_tx=CommittedTx,
-                              prepared_tx=PreparedTx
+                              prepared_tx=PreparedTx,
+                              my_log=MyLog
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, 
                         PrepareTime),
     case Result of
         {ok, NewPrepare} ->
-            gen_fsm:send_event(OriginalSender, {prepared, NewPrepare}),
-            {noreply,  State};
+            TxId = Transaction#transaction.txn_id,
+            PendingRecord = {prepare, ?QUORUM-1, OriginalSender, {prepared, NewPrepare},
+                    {Transaction, WriteSet}},
+            ets:insert(MyLog, {Transaction#transaction.txn_id, PendingRecord}), 
+            ReplNodes = log_utilities:get_my_next(Partition, ?REP_FACTOR-1),
+            replicate_log(ReplNodes, {prepare, {TxId, {Transaction,WriteSet}}}, {Partition, node()}),
+            {noreply, State};
         {error, wait_more} ->
             spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, no_updates} ->
-            gen_fsm:send_event(OriginalSender, {error, no_tx_record}),
+            riak_core_vnode:reply(OriginalSender, {error, no_tx_record}),
             {noreply, State};
         {error, write_conflict} ->
-            gen_fsm:send_event(OriginalSender, abort),
+            riak_core_vnode:reply(OriginalSender, abort),
+            %gen_fsm:send_event(OriginalSender, abort),
             {noreply, State}
     end;
 
@@ -221,7 +303,8 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
 handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               committed_tx=CommittedTx,
-                              prepared_tx=PreparedTx
+                              prepared_tx=PreparedTx,
+                              my_log=MyLog
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     %lager:info("Before preparing"),
@@ -231,12 +314,22 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
             ResultCommit = commit(Transaction, NewPrepare, WriteSet, CommittedTx, State),
             case ResultCommit of
                 {ok, {committed, NewCommittedTxs}} ->
-                    gen_fsm:send_event(OriginalSender, {committed, NewPrepare}),
+                    %lager:info("Trying to replicate"),
+                    TxId = Transaction#transaction.txn_id,
+                    PendingRecord = {commit, ?QUORUM-1, OriginalSender, 
+                                {committed, NewPrepare}, {Transaction, WriteSet}},
+                    ets:insert(MyLog, {TxId, PendingRecord}), 
+                    ReplNodes = log_utilities:get_my_next(Partition, ?REP_FACTOR-1),
+                    %lager:info("Got my next ~p", [ReplNodes]),
+                    replicate_log(ReplNodes, {commit, {TxId, {NewPrepare,Transaction,WriteSet}}},
+                                {Partition, node()}),
+                    %lager:info("Sent message"),
                     {noreply, State#state{committed_tx=NewCommittedTxs}};
                 %{error, timeout} ->
                 %    {reply, {error, timeout}, State};
                 {error, no_updates} ->
-                    gen_fsm:send_event(OriginalSender, no_tx_record),
+                    %gen_fsm:send_event(OriginalSender, no_tx_record),
+                    riak_core_vnode:reply(OriginalSender, no_tx_record),
                     {noreply, State}
             end;
         {error, wait_more}->
@@ -244,25 +337,35 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, no_updates} ->
-            gen_fsm:send_event(OriginalSender, {error, no_tx_record}),
+            %gen_fsm:send_event(OriginalSender, {error, no_tx_record}),
+            riak_core_vnode:reply(OriginalSender, {error, no_tx_record}),
             {noreply, State};
         {error, write_conflict} ->
-            gen_fsm:send_event(OriginalSender, abort),
+            riak_core_vnode:reply(OriginalSender, abort),
+            %gen_fsm:send_event(OriginalSender, abort),
             {noreply, State}
     end;
 
 %% TODO: sending empty writeset to clocksi_downstream_generatro
 %% Just a workaround, need to delete downstream_generator_vnode
 %% eventually.
-handle_command({commit, Transaction, TxCommitTime, Updates}, _Sender,
-               #state{partition=_Partition,
+handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
+               #state{partition=Partition,
+                      my_log=MyLog,
                       committed_tx=CommittedTx
                       } = State) ->
     %%lager:info("Commting in vnode"),
     Result = commit(Transaction, TxCommitTime, Updates, CommittedTx, State),
     case Result of
         {ok, {committed,NewCommittedTx}} ->
-            {reply, committed, State#state{committed_tx=NewCommittedTx}};
+            TxId = Transaction#transaction.txn_id,
+            PendingRecord = {commit, ?QUORUM-1, Sender, 
+                    committed, {Transaction, TxCommitTime, Updates}},
+            ets:insert(MyLog, {TxId, PendingRecord}), 
+            ReplNodes = log_utilities:get_my_next(Partition, ?REP_FACTOR-1),
+            replicate_log(ReplNodes, {commit, {TxId, {Transaction,Updates}}},
+                    {Partition, node()}),
+            {noreply, State#state{committed_tx=NewCommittedTx}};
         %{error, materializer_failure} ->
         %    {reply, {error, materializer_failure}, State};
         %{error, timeout} ->
