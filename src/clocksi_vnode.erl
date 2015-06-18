@@ -28,8 +28,6 @@
 	 async_read_data_item/4,
 	 get_cache_name/2,
          check_prepared/3,
-         replicate_log/3,
-         log_replicated/2,
          prepare/2,
          commit/3,
          reset_prepared/5,
@@ -42,6 +40,7 @@
          handle_command/3,
          is_empty/1,
          delete/1,
+         open_table/2,
 	 check_tables_ready/0,
          handle_handoff_command/3,
          handoff_starting/2,
@@ -69,8 +68,6 @@
 %%----------------------------------------------------------------------
 -record(state, {partition :: non_neg_integer(),
                 prepared_tx :: cache_id(),
-                my_log :: cache_id(),
-                replication_log :: dict(),
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 committed_tx :: dict(),
@@ -107,17 +104,6 @@ prepare(ListofNodes, TxId) ->
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
 
-replicate_log(ListOfNodes, Log, Master) ->
-    riak_core_vnode_master:command(ListOfNodes,
-                                    {replicate_log, Log, Master},
-                                    {fsm, undefined, self()},
-                                   ?CLOCKSI_MASTER).
-
-log_replicated(Master, Reply) ->
-    riak_core_vnode_master:command(Master,
-                                    {log_replicated, Reply},
-                                    {fsm, undefined, self()},
-                                   ?CLOCKSI_MASTER).
 
 %% @doc Sends prepare+commit to a single partition
 %%      Called by a Tx coordinator when the tx only
@@ -158,21 +144,24 @@ init([Partition]) ->
     PreparedTx = open_table(Partition, prepared),
     CommittedTx = dict:new(),
     InMemoryStore = open_table(Partition, inmemory_store),
-    MyLog = open_table(Partition, my_log),
     
     clocksi_readitem_fsm:start_read_servers(Partition),
-    
+
     IfCertify = antidote_config:get(certification),
     IfReplicate = antidote_config:get(replication),
-    Predecessors = log_utilities:get_my_previous(Partition, ?REP_FACTOR-1),
-    NewReplicationLog = open_local_tables(Predecessors, dict:new()),
+
+    case IfReplicate of
+        true ->
+            repl_fsm_sup:start_fsm(Partition);
+        false ->
+            ok
+    end,
+
     {ok, #state{partition=Partition,
                 prepared_tx=PreparedTx,
                 committed_tx=CommittedTx,
-                my_log=MyLog,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
-                replication_log=NewReplicationLog,
                 inmemory_store=InMemoryStore}}.
 
 
@@ -181,8 +170,6 @@ check_tables_ready() ->
     PartitionList = chashbin:to_list(CHBin),
     check_table_ready(PartitionList).
 
-int_to_atom(Int) ->
-    list_to_atom(integer_to_list(Int)).
 
 check_table_ready([]) ->
     true;
@@ -196,21 +183,6 @@ check_table_ready([{Partition,Node}|Rest]) ->
 	    check_table_ready(Rest);
 	false ->
 	    false
-    end.
-
-open_local_tables([], Dict) ->
-    Dict;
-open_local_tables([{Part, Node}|Rest], Dict) ->
-    try
-    Tab = ets:new(int_to_atom(Part),
-            [set,?TABLE_CONCURRENCY]),
-    NewDict = dict:store(Part, Tab, Dict),
-    open_local_tables(Rest, NewDict)
-    catch
-    _:_Reason ->
-        lager:info("Error opening table..."),
-        %% Someone hasn't finished cleaning up yet
-        open_local_tables([{Part, Node}|Rest], Dict)
     end.
 
 open_table(Partition, Name) ->
@@ -237,60 +209,28 @@ handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
     Result = clocksi_readitem_fsm:check_partition_ready(Node,Partition,?READ_CONCURRENCY),
     {reply, Result, SD0};
 
-handle_command({replicate_log, Log, Master}, _Sender, #state{replication_log=ReplicationLog}=State) ->
-    {Type, {TxId, Record}} = Log,
-    {Index, _Node} = Master,
-    RepTab = dict:fetch(Index, ReplicationLog),
-    true = ets:insert(RepTab, {TxId, Record}),
-    log_replicated(Master, {Type, TxId}), 
-    {noreply, State};
-    %{reply, {log_replicated, {Type, TxId}}, State};
-
-
-handle_command({log_replicated, {Type, TxId}}, _Sender, #state{my_log=MyLog}=State) ->
-    %lager:info("Got reply ~p", [Type]),
-    case ets:lookup(MyLog, TxId) of 
-        [{TxId, {RecordType, AckNeeded, Sender, MsgToReply, Record}}] ->
-            case Type of
-                RecordType ->
-                    case AckNeeded of
-                        1 -> %%Has got all neede ack, can log message already
-                            %lager:info("Returned to client"),
-                            ets:insert(MyLog, {TxId, Record}),
-                            %lager:info("#####DONE#####Sending ~p to ~p", [Sender, MsgToReply]),
-                            riak_core_vnode:reply(Sender, MsgToReply);
-                        _ -> %%Wait for more replies
-                            ets:insert(MyLog, {TxId, {RecordType, AckNeeded-1, 
-                                    Sender, MsgToReply, Record}})
-                    end;
-                _ ->
-                    ok
-            end;
-        [_SomeRecord] -> %%The record is appended already, do nothing
-            %lager:info("No need to do anything ~p", [_SomeRecord]),
-            ok
-    end,
-    {noreply, State};
-    
-
 handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               committed_tx=CommittedTx,
-                              prepared_tx=PreparedTx,
-                              my_log=MyLog
+                              if_replicate=IfReplicate,
+                              if_certify=IfCertify,
+                              prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, 
-                        PrepareTime),
+                        PrepareTime, IfCertify),
     case Result of
         {ok, NewPrepare} ->
-            TxId = Transaction#transaction.txn_id,
-            PendingRecord = {prepare, ?QUORUM-1, OriginalSender, {prepared, NewPrepare},
-                    {Transaction, WriteSet}},
-            ets:insert(MyLog, {Transaction#transaction.txn_id, PendingRecord}), 
-            ReplNodes = log_utilities:get_my_next(Partition, ?REP_FACTOR-1),
-            replicate_log(ReplNodes, {prepare, {TxId, {Transaction,WriteSet}}}, {Partition, node()}),
-            {noreply, State};
+            case IfReplicate of
+                true ->
+                    TxId = Transaction#transaction.txn_id,
+                    PendingRecord = {prepare, ?QUORUM-1, OriginalSender, 
+                            {prepared, NewPrepare}, {Transaction, WriteSet}},
+                    repl_fsm:replicate(Partition, {TxId, PendingRecord}),
+                    {noreply, State};
+                false ->
+                    {reply, {prepared, NewPrepare}}
+            end;
         {error, wait_more} ->
             spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
@@ -305,33 +245,32 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
     end;
 
 
-    
-
 handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               committed_tx=CommittedTx,
-                              prepared_tx=PreparedTx,
-                              my_log=MyLog
+                              if_replicate=IfReplicate,
+                              if_certify=IfCertify,
+                              prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     %lager:info("Before preparing"),
-    Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime), 
+    Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime, IfCertify), 
     case Result of
         {ok, NewPrepare} ->
             ResultCommit = commit(Transaction, NewPrepare, WriteSet, CommittedTx, State),
             case ResultCommit of
                 {ok, {committed, NewCommittedTxs}} ->
-                    %lager:info("Trying to replicate"),
-                    TxId = Transaction#transaction.txn_id,
-                    PendingRecord = {commit, ?QUORUM-1, OriginalSender, 
+                    case IfReplicate of
+                        true ->
+                            TxId = Transaction#transaction.txn_id,
+                            PendingRecord = {commit, ?QUORUM-1, OriginalSender, 
                                 {committed, NewPrepare}, {Transaction, WriteSet}},
-                    ets:insert(MyLog, {TxId, PendingRecord}), 
-                    ReplNodes = log_utilities:get_my_next(Partition, ?REP_FACTOR-1),
-                    %lager:info("Got my next ~p", [ReplNodes]),
-                    replicate_log(ReplNodes, {commit, {TxId, {NewPrepare,Transaction,WriteSet}}},
-                                {Partition, node()}),
-                    %lager:info("Sent message"),
-                    {noreply, State#state{committed_tx=NewCommittedTxs}};
+                            repl_fsm:replicate(Partition, {TxId, PendingRecord}),
+                            {noreply, State#state{committed_tx=NewCommittedTxs}};
+                        false ->
+                            {reply, {committed, NewPrepare}, 
+                                    State#state{committed_tx=NewCommittedTxs}}
+                        end;
                 %{error, timeout} ->
                 %    {reply, {error, timeout}, State};
                 {error, no_updates} ->
@@ -358,21 +297,23 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
 %% eventually.
 handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
-                      my_log=MyLog,
-                      committed_tx=CommittedTx
+                      committed_tx=CommittedTx,
+                      if_replicate=IfReplicate
                       } = State) ->
     %%lager:info("Commting in vnode"),
     Result = commit(Transaction, TxCommitTime, Updates, CommittedTx, State),
     case Result of
         {ok, {committed,NewCommittedTx}} ->
-            TxId = Transaction#transaction.txn_id,
-            PendingRecord = {commit, ?QUORUM-1, Sender, 
-                    committed, {Transaction, TxCommitTime, Updates}},
-            ets:insert(MyLog, {TxId, PendingRecord}), 
-            ReplNodes = log_utilities:get_my_next(Partition, ?REP_FACTOR-1),
-            replicate_log(ReplNodes, {commit, {TxId, {Transaction,Updates}}},
-                    {Partition, node()}),
-            {noreply, State#state{committed_tx=NewCommittedTx}};
+            case IfReplicate of
+                true ->
+                    TxId = Transaction#transaction.txn_id,
+                    PendingRecord = {commit, ?QUORUM-1, Sender, 
+                        committed, {Transaction, TxCommitTime, Updates}},
+                    repl_fsm:replicate(Partition, {TxId, PendingRecord}),
+                    {noreply, State#state{committed_tx=NewCommittedTx}};
+                false ->
+                    {reply, committed, State#state{committed_tx=NewCommittedTx}}
+            end;
         %{error, materializer_failure} ->
         %    {reply, {error, materializer_failure}, State};
         %{error, timeout} ->
@@ -459,9 +400,9 @@ async_send_msg(Msg, To) ->
     timer:sleep(SleepTime),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
-prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime)->
+prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime, IfCertify)->
     TxId = Transaction#transaction.txn_id,
-    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTx) of
+    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTx, IfCertify) of
         true ->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
@@ -572,9 +513,11 @@ now_microsec({MegaSecs, Secs, MicroSecs}) ->
 %%      to the prepared state.
 %certification_check(_TxId, _H, _CommittedTx, _PreparedTx) ->
 %    true.
-certification_check(_, [], _, _) ->
+certification_check(_, _, _, _, false) ->
     true;
-certification_check(TxId, [H|T], CommittedTx, PreparedTx) ->
+certification_check(_, [], _, _, true) ->
+    true;
+certification_check(TxId, [H|T], CommittedTx, PreparedTx, true) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     {Key, _Type, _} = H,
     case dict:find(Key, CommittedTx) of
@@ -585,7 +528,7 @@ certification_check(TxId, [H|T], CommittedTx, PreparedTx) ->
                 false ->
                     case check_prepared(TxId, PreparedTx, Key) of
                         true ->
-                            certification_check(TxId, T, CommittedTx, PreparedTx);
+                            certification_check(TxId, T, CommittedTx, PreparedTx, true);
                         false ->
                             false;
                         wait ->
@@ -595,7 +538,7 @@ certification_check(TxId, [H|T], CommittedTx, PreparedTx) ->
         error ->
             case check_prepared(TxId, PreparedTx, Key) of
                 true ->
-                    certification_check(TxId, T, CommittedTx, PreparedTx); 
+                    certification_check(TxId, T, CommittedTx, PreparedTx, true); 
                 false ->
                     false;
                 wait ->

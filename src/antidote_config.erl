@@ -8,15 +8,15 @@
 %% Public API
 %% ===================================================================
 
-load(Files) ->
+load(File) ->
     TermsList =
-        [ case file:consult(File) of
+        case file:consult(File) of
               {ok, Terms} ->
                   Terms;
               {error, Reason} ->
-                  erlang:error("Failed to parse config file ~s: ~p\n", [File, Reason])
-          end || File <- Files ],
-    load_config(lists:append(TermsList)).
+                  io:format("Failed to parse config file ~s: ~p\n", [File, Reason])
+          end,
+    load_config(TermsList).
 
 set(Key, Value) ->
     ok = application:set_env(basho_bench, Key, Value).
@@ -26,7 +26,7 @@ get(Key) ->
         {ok, Value} ->
             Value;
         undefined ->
-            erlang:error("Missing configuration key", [Key])
+            io:format("Missing configuration key ~p", [Key])
     end.
 
 get(Key, Default) ->

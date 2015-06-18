@@ -88,6 +88,11 @@ init(_Args) ->
     		      permanent, 5000, supervisor,
     		      [clocksi_readitem_sup]},
     
+    ReplFsmSup = {repl_fsm_sup,
+    		      {repl_fsm_sup, start_link, []},
+    		      permanent, 5000, supervisor,
+    		      [repl_fsm_sup]},
+
     VectorClockMaster = {vectorclock_vnode_master,
                          {riak_core_vnode_master,  start_link,
                           [vectorclock_vnode]},
@@ -104,6 +109,8 @@ init(_Args) ->
     %		      permanent, 5000, supervisor,
     %		      [inter_dc_communication_sender_fsm_sup]},
 
+    antidote_config:load("../../include/antidote.config"),
+
 
     %InterDcManager = {inter_dc_manager,
     %                    {inter_dc_manager, start_link, []},
@@ -116,6 +123,7 @@ init(_Args) ->
        ClockSIsTxCoordSup,
        ClockSIiTxCoordSup,
        ClockSiReadSup,
+       ReplFsmSup,
        %InterDcRepMaster,
        %InterDcRecvrMaster,
        %InterDcManager,
