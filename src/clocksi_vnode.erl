@@ -71,6 +71,8 @@
                 prepared_tx :: cache_id(),
                 my_log :: cache_id(),
                 replication_log :: dict(),
+                if_certify :: boolean(),
+                if_replicate :: boolean(),
                 committed_tx :: dict(),
                 inmemory_store :: cache_id()}).
 
@@ -157,14 +159,19 @@ init([Partition]) ->
     CommittedTx = dict:new(),
     InMemoryStore = open_table(Partition, inmemory_store),
     MyLog = open_table(Partition, my_log),
-    Predecessors = log_utilities:get_my_previous(Partition, ?REP_FACTOR-1),
-    ReplicationLog = dict:new(),
-    NewReplicationLog = open_local_tables(Predecessors, ReplicationLog),
+    
     clocksi_readitem_fsm:start_read_servers(Partition),
+    
+    IfCertify = antidote_config:get(certification),
+    IfReplicate = antidote_config:get(replication),
+    Predecessors = log_utilities:get_my_previous(Partition, ?REP_FACTOR-1),
+    NewReplicationLog = open_local_tables(Predecessors, dict:new()),
     {ok, #state{partition=Partition,
                 prepared_tx=PreparedTx,
                 committed_tx=CommittedTx,
                 my_log=MyLog,
+                if_certify = IfCertify,
+                if_replicate = IfReplicate,
                 replication_log=NewReplicationLog,
                 inmemory_store=InMemoryStore}}.
 
