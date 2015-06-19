@@ -33,8 +33,8 @@
 
 %% Callbacks
 -export([init/1,
-	 handle_call/3,
-	 handle_cast/2,
+	    handle_call/3,
+	    handle_cast/2,
          code_change/3,
          handle_event/3,
          handle_info/2,
@@ -43,8 +43,9 @@
 
 %% States
 -export([replicate/2,
-        repl_ack/2,
-        replicate_log/3]).
+        retrieve_log/2,
+        replicate_log/3,
+        repl_ack/2]).
 
 %% Spawn
 
@@ -74,6 +75,8 @@ replicate_log(Partitions, MyPartition, Log) ->
 repl_ack(Partition, Reply) ->
     gen_server:cast({global, get_replfsm_name(Partition)}, {repl_ack, Reply}).
 
+retrieve_log(Partition, LogName) ->
+    gen_server:cast({global, get_replfsm_name(Partition)}, {retrieve_log, LogName}).
 %%%===================================================================
 %%% Internal
 %%%===================================================================
@@ -89,6 +92,22 @@ init([Partition]) ->
                 successors = Successors,
                 replicated_log = ReplicatedLog}}.
 
+handle_call({retrieve_log, LogName},  _Sender,
+	    SD0=#state{partition=Partition, my_log=MyLog, 
+                    replicated_log=ReplicatedLog}) ->
+    Table= case LogName of
+                Partition ->
+                    ets:tab2list(MyLog);
+                _ ->
+                    case dict:find(ReplicatedLog, Partition) of
+                        {ok, Tab} ->
+                            ets:tab2list(Tab);
+                        error ->
+                            {error, no_table}
+                    end
+            end,
+    {reply, Table, SD0};
+
 handle_call({go_down},_Sender,SD0) ->
     {stop,shutdown,ok,SD0}.
 
@@ -99,6 +118,7 @@ handle_cast({replicate, PendingLog},
     ets:insert(MyLog, {TxId, PendingRecord}),
     replicate_log(Successors, Partition, {Type, {TxId, TxInfo}}),
     {noreply, SD0};
+
 
 handle_cast({replicate_log, PrimaryPartition, Log}, 
 	    SD0=#state{replicated_log=ReplicatedLog}) ->

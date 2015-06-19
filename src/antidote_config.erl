@@ -9,12 +9,17 @@
 %% ===================================================================
 
 load(File) ->
+    FileName = case file:read_file_info(File) of
+                    {ok, _} -> File;
+                    {error, enoent} -> "../"++File;
+                    {error, _R} -> File
+               end,
     TermsList =
-        case file:consult(File) of
+        case file:consult(FileName) of
               {ok, Terms} ->
                   Terms;
               {error, Reason} ->
-                  io:format("Failed to parse config file ~s: ~p\n", [File, Reason])
+                  io:format("Failed to parse config file ~s: ~p\n", [FileName, Reason])
           end,
     load_config(TermsList).
 
