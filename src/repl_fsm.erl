@@ -53,7 +53,7 @@
 		id :: non_neg_integer(),
         my_log :: cache_id(),
         successors :: [atom()],
-        replicated_log :: dict(),
+        replicated_log :: cache_id(),
 		self :: atom()}).
 
 %%%===================================================================
@@ -83,10 +83,9 @@ retrieve_log(Partition, LogName) ->
 
 
 init([Partition]) ->
-    Predecessors = log_utilities:get_my_previous(Partition, ?REPL_FACTOR-1),
     Successors = [get_replfsm_name(Index) || {Index, _Node} <- log_utilities:get_my_next(Partition, ?REPL_FACTOR-1)],
     MyLog = clocksi_vnode:open_table(Partition, my_log),
-    ReplicatedLog = open_local_tables(Predecessors, dict:new()),
+    ReplicatedLog = clocksi_vnode:open_table(Partition, repl_log),
     {ok, #state{partition=Partition,
                 my_log= MyLog,
                 successors = Successors,
@@ -97,13 +96,14 @@ handle_call({retrieve_log, LogName},  _Sender,
                     replicated_log=ReplicatedLog}) ->
     Table= case LogName of
                 Partition ->
-                    ets:tab2list(MyLog);
+                    {durable, Log} = ets:lookup(MyLog, durable),
+                    Log;
                 _ ->
-                    case dict:find(ReplicatedLog, Partition) of
-                        {ok, Tab} ->
-                            ets:tab2list(Tab);
-                        error ->
-                            {error, no_table}
+                    case ets:lookup(ReplicatedLog, Partition) of
+                        [{Partition, Log}] ->
+                            Log;
+                        [] ->
+                            []
                     end
             end,
     {reply, Table, SD0};
@@ -119,13 +119,17 @@ handle_cast({replicate, PendingLog},
     replicate_log(Successors, Partition, {Type, {TxId, TxInfo}}),
     {noreply, SD0};
 
-
-handle_cast({replicate_log, PrimaryPartition, Log}, 
+handle_cast({replicate_log, PrimaryPart, Log}, 
 	    SD0=#state{replicated_log=ReplicatedLog}) ->
     {Type, {TxId, Record}} = Log,
-    RepTab = dict:fetch(PrimaryPartition, ReplicatedLog),
-    true = ets:insert(RepTab, {TxId, Record}),
-    repl_ack(PrimaryPartition, {Type,TxId}),
+    DurableLog = case ets:lookup(ReplicatedLog, PrimaryPart) of
+                                            [] ->
+                                                [];
+                                            [{PrimaryPart, Result}] ->
+                                                lists:sublist(Result, ?LOG_SIZE)
+                                        end,
+    ets:insert(ReplicatedLog, {PrimaryPart, [{TxId, Record}|DurableLog]}),
+    repl_ack(PrimaryPart, {Type,TxId}),
     {noreply, SD0};
 
 handle_cast({repl_ack, {Type, TxId}}, SD0=#state{my_log=MyLog}) ->
@@ -136,7 +140,14 @@ handle_cast({repl_ack, {Type, TxId}}, SD0=#state{my_log=MyLog}) ->
                     case AckNeeded of
                         1 -> %%Has got all neede ack, can log message already
                             %lager:info("Returned to client"),
-                            ets:insert(MyLog, {TxId, Record}),
+                            DurableLog = case ets:lookup(MyLog, durable) of
+                                            [] ->
+                                                [];
+                                            [{durable, Result}] ->
+                                                lists:sublist(Result, ?LOG_SIZE)
+                                        end,
+                            ets:insert(MyLog, {durable, [{TxId, Record}|DurableLog]}),
+                            ets:delete(MyLog, TxId),
                             %lager:info("#####DONE#####Sending ~p to ~p", [Sender, MsgToReply]),
                             {fsm, undefined, FSMSender} = Sender,
                             gen_fsm:send_event(FSMSender, MsgToReply);
@@ -147,7 +158,7 @@ handle_cast({repl_ack, {Type, TxId}}, SD0=#state{my_log=MyLog}) ->
                 _ ->
                     ok
             end;
-        [_SomeRecord] -> %%The record is appended already, do nothing
+        [] -> %%The record is appended already, do nothing
             %lager:info("No need to do anything ~p", [_SomeRecord]),
             ok
     end,
@@ -170,23 +181,23 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 terminate(_Reason, _SD) ->
     ok.
 
-open_local_tables([], Dict) ->
-    Dict;
-open_local_tables([{Part, Node}|Rest], Dict) ->
-    try
-    Tab = ets:new(int_to_atom(Part),
-            [set,?TABLE_CONCURRENCY]),
-    NewDict = dict:store(Part, Tab, Dict),
-    open_local_tables(Rest, NewDict)
-    catch
-    _:_Reason ->
-        lager:info("Error opening table..."),
-        %% Someone hasn't finished cleaning up yet
-        open_local_tables([{Part, Node}|Rest], Dict)
-    end.
+%open_local_tables([], Dict) ->
+%    Dict;
+%open_local_tables([{Part, Node}|Rest], Dict) ->
+%    try
+%    Tab = ets:new(int_to_atom(Part),
+%            [set,?TABLE_CONCURRENCY]),
+%    NewDict = dict:store(Part, Tab, Dict),
+%    open_local_tables(Rest, NewDict)
+%    catch
+%    _:_Reason ->
+%        lager:info("Error opening table..."),
+%        %% Someone hasn't finished cleaning up yet
+%        open_local_tables([{Part, Node}|Rest], Dict)
+%    end.
 
-int_to_atom(Int) ->
-    list_to_atom(integer_to_list(Int)).
+%int_to_atom(Int) ->
+%    list_to_atom(integer_to_list(Int)).
 
 get_replfsm_name(Partition) ->
     list_to_atom(atom_to_list(repl_fsm)++integer_to_list(Partition)).
