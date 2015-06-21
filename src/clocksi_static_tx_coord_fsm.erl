@@ -159,14 +159,8 @@ execute_batch_ops(timeout, SD=#state{
                         {update, Key, Type, Op} ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
-                            UpdatedPartitions1 = case dict:is_key(IndexNode, UpdatedPartitions) of
-                                                    false ->
-                                                        dict:store(IndexNode, [{Key, Type, Op}], 
-                                                            UpdatedPartitions);
-                                                    true ->
-                                                        dict:append(IndexNode, {Key, Type, Op}, 
-                                                            UpdatedPartitions)
-                                                end,
+                            UpdatedPartitions1 =  dict:append(IndexNode, {Key, Type, Op}, 
+                                                            UpdatedPartitions),
                             {UpdatedPartitions1, NumToRead}
                     end
                 end,
