@@ -231,7 +231,8 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State};
                 false ->
-                    {reply, {prepared, NewPrepare}}
+                    riak_core_vnode:reply(OriginalSender, {prepared, NewPrepare}),
+                    {noreply, State}
             end;
         {error, wait_more} ->
             spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
@@ -271,8 +272,8 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                             {noreply, State#state{committed_tx=NewCommittedTxs}};
                         false ->
-                            {reply, {committed, NewPrepare}, 
-                                    State#state{committed_tx=NewCommittedTxs}}
+                            riak_core_vnode:reply(OriginalSender, {committed, NewPrepare}),
+                            {noreply, State#state{committed_tx=NewCommittedTxs}}
                         end;
                 %{error, timeout} ->
                 %    {reply, {error, timeout}, State};
