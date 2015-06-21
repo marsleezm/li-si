@@ -109,7 +109,7 @@ init(_Args) ->
     %		      permanent, 5000, supervisor,
     %		      [inter_dc_communication_sender_fsm_sup]},
 
-    antidote_config:load("config/antidote.config"),
+    antidote_config:load("antidote.config"),
 
 
     %InterDcManager = {inter_dc_manager,

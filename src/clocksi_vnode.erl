@@ -53,8 +53,6 @@
 
 -ignore_xref([start_vnode/1]).
 
--define(REP_FACTOR, 3).
--define(QUORUM, 2).
 %%---------------------------------------------------------------------
 %% @doc Data Type: state
 %%      where:
@@ -71,6 +69,7 @@
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 committed_tx :: dict(),
+                quorum :: non_neg_integer(),
                 inmemory_store :: cache_id()}).
 
 %%%===================================================================
@@ -147,8 +146,9 @@ init([Partition]) ->
     
     clocksi_readitem_fsm:start_read_servers(Partition),
 
-    IfCertify = antidote_config:get(certification),
-    IfReplicate = antidote_config:get(replication),
+    IfCertify = antidote_config:get(do_cert),
+    IfReplicate = antidote_config:get(do_repl),
+    Quorum = antidote_config:get(quorum),
 
     case IfReplicate of
         true ->
@@ -160,6 +160,7 @@ init([Partition]) ->
     {ok, #state{partition=Partition,
                 prepared_tx=PreparedTx,
                 committed_tx=CommittedTx,
+                quorum = Quorum,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
                 inmemory_store=InMemoryStore}}.
@@ -214,6 +215,7 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                               committed_tx=CommittedTx,
                               if_replicate=IfReplicate,
                               if_certify=IfCertify,
+                              quorum=Quorum,
                               prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
@@ -224,7 +226,7 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
             case IfReplicate of
                 true ->
                     TxId = Transaction#transaction.txn_id,
-                    PendingRecord = {prepare, ?QUORUM-1, OriginalSender, 
+                    PendingRecord = {prepare, Quorum-1, OriginalSender, 
                             {prepared, NewPrepare}, {Transaction, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State};
@@ -250,6 +252,7 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                               committed_tx=CommittedTx,
                               if_replicate=IfReplicate,
                               if_certify=IfCertify,
+                              quorum=Quorum,
                               prepared_tx=PreparedTx
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
@@ -263,7 +266,7 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                     case IfReplicate of
                         true ->
                             TxId = Transaction#transaction.txn_id,
-                            PendingRecord = {commit, ?QUORUM-1, OriginalSender, 
+                            PendingRecord = {commit, Quorum-1, OriginalSender, 
                                 {committed, NewPrepare}, {Transaction, WriteSet}},
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                             {noreply, State#state{committed_tx=NewCommittedTxs}};
@@ -298,6 +301,7 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
 handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
                       committed_tx=CommittedTx,
+                      quorum=Quorum,
                       if_replicate=IfReplicate
                       } = State) ->
     %%lager:info("Commting in vnode"),
@@ -307,7 +311,7 @@ handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
             case IfReplicate of
                 true ->
                     TxId = Transaction#transaction.txn_id,
-                    PendingRecord = {commit, ?QUORUM-1, Sender, 
+                    PendingRecord = {commit, Quorum-1, Sender, 
                         committed, {Transaction, TxCommitTime, Updates}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State#state{committed_tx=NewCommittedTx}};

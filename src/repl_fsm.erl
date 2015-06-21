@@ -22,7 +22,6 @@
 -behavior(gen_server).
 
 -include("antidote.hrl").
--include("speculation.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -52,6 +51,8 @@
 -record(state, {partition :: non_neg_integer(),
 		id :: non_neg_integer(),
         my_log :: cache_id(),
+        log_size :: non_neg_integer(),
+        quorum :: non_neg_integer(),
         successors :: [atom()],
         replicated_log :: cache_id(),
 		self :: atom()}).
@@ -76,18 +77,23 @@ repl_ack(Partition, Reply) ->
     gen_server:cast({global, get_replfsm_name(Partition)}, {repl_ack, Reply}).
 
 retrieve_log(Partition, LogName) ->
-    gen_server:cast({global, get_replfsm_name(Partition)}, {retrieve_log, LogName}).
+    gen_server:call({global, get_replfsm_name(Partition)}, {retrieve_log, LogName}).
 %%%===================================================================
 %%% Internal
 %%%===================================================================
 
 
 init([Partition]) ->
-    Successors = [get_replfsm_name(Index) || {Index, _Node} <- log_utilities:get_my_next(Partition, ?REPL_FACTOR-1)],
+    ReplFactor = antidote_config:get(repl_factor),
+    Quorum = antidote_config:get(quorum),
+    LogSize = antidote_config:get(log_size),
+    Successors = [get_replfsm_name(Index) || {Index, _Node} <- log_utilities:get_my_next(Partition, ReplFactor-1)],
     MyLog = clocksi_vnode:open_table(Partition, my_log),
     ReplicatedLog = clocksi_vnode:open_table(Partition, repl_log),
     {ok, #state{partition=Partition,
                 my_log= MyLog,
+                log_size = LogSize,
+                quorum = Quorum,
                 successors = Successors,
                 replicated_log = ReplicatedLog}}.
 
@@ -120,19 +126,20 @@ handle_cast({replicate, PendingLog},
     {noreply, SD0};
 
 handle_cast({replicate_log, PrimaryPart, Log}, 
-	    SD0=#state{replicated_log=ReplicatedLog}) ->
+	    SD0=#state{replicated_log=ReplicatedLog, log_size=LogSize}) ->
     {Type, {TxId, Record}} = Log,
     DurableLog = case ets:lookup(ReplicatedLog, PrimaryPart) of
                                             [] ->
                                                 [];
                                             [{PrimaryPart, Result}] ->
-                                                lists:sublist(Result, ?LOG_SIZE)
+                                                lists:sublist(Result, LogSize)
                                         end,
     ets:insert(ReplicatedLog, {PrimaryPart, [{TxId, Record}|DurableLog]}),
     repl_ack(PrimaryPart, {Type,TxId}),
     {noreply, SD0};
 
-handle_cast({repl_ack, {Type, TxId}}, SD0=#state{my_log=MyLog}) ->
+handle_cast({repl_ack, {Type, TxId}}, SD0=#state{my_log=MyLog,
+            log_size=LogSize}) ->
     case ets:lookup(MyLog, TxId) of
         [{TxId, {RecordType, AckNeeded, Sender, MsgToReply, Record}}] ->
             case Type of
@@ -144,7 +151,7 @@ handle_cast({repl_ack, {Type, TxId}}, SD0=#state{my_log=MyLog}) ->
                                             [] ->
                                                 [];
                                             [{durable, Result}] ->
-                                                lists:sublist(Result, ?LOG_SIZE)
+                                                lists:sublist(Result, LogSize)
                                         end,
                             ets:insert(MyLog, {durable, [{TxId, Record}|DurableLog]}),
                             ets:delete(MyLog, TxId),
