@@ -24,12 +24,14 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([start_vnode/1,
-	 read_data_item/4,
-	 async_read_data_item/4,
-	 get_cache_name/2,
+	    read_data_item/4,
+	    async_read_data_item/4,
+	    get_cache_name/2,
+         update_store/4,
          check_prepared/3,
          prepare/2,
          commit/3,
+         set_prepared/5,
          reset_prepared/5,
          async_send_msg/2,
          single_commit/2,
@@ -411,9 +413,11 @@ prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime, IfCertify
         true ->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
+
 		    PrepList = set_prepared(PreparedTx, TxWriteSet, TxId,PrepareTime,[]),
 		    NewPrepare = now_microsec(erlang:now()),
 		    reset_prepared(PreparedTx, TxWriteSet, TxId,NewPrepare,PrepList),
+
 		    %LogRecord = #log_record{tx_id=TxId,
 			%		    op_type=prepare,
 			%		    op_payload=NewPrepare},
@@ -464,7 +468,7 @@ commit(Transaction, TxCommitTime, Updates, CommittedTx,
             %[Node] = log_utilities:get_preflist_from_key(Key),
             %case logging_vnode:append(Node,LogId,LogRecord) of
             %    {ok, _} ->
-                    %lager:info("Committing ops ~w",[Updates]),
+    
                     update_store(Updates, Transaction, TxCommitTime, InMemoryStore),
                     NewDict = dict:store(Key, TxCommitTime, CommittedTx),
                     clean_and_notify(TxId,Updates,State),
