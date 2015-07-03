@@ -1,4 +1,3 @@
-%% -------------------------------------------------------------------
 %%
 %% Copyright (c) 2014 SyncFree Consortium.  All Rights Reserved.
 %%
@@ -59,7 +58,7 @@
 %% @doc Data Type: state
 %%      where:
 %%          partition: the partition that the vnode is responsible for.
-%%          prepared_tx: a list of prepared transactions.
+%%          tx_metadata: a list of prepared transactions.
 %%          committed_tx: a list of committed transactions.
 %%          downstream_set: a list of the downstream operations that the
 %%              transactions generate.
@@ -67,10 +66,10 @@
 %%              generate.
 %%----------------------------------------------------------------------
 -record(state, {partition :: non_neg_integer(),
-                prepared_tx :: cache_id(),
+                tx_metadata :: cache_id(),
+                committed_tx :: dict(),
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
-                committed_tx :: dict(),
                 quorum :: non_neg_integer(),
                 inmemory_store :: cache_id()}).
 
@@ -89,7 +88,6 @@ read_data_item(Node, Key, Type, TxId) ->
 	    Other ->
 	        Other
     end.
-
 
 %% @doc Sends a read request to the Node that is responsible for the Key
 async_read_data_item(Node, Key, Type, TxId) ->
@@ -142,8 +140,9 @@ get_cache_name(Partition,Base) ->
 %% @doc Initializes all data structures that vnode needs to track information
 %%      the transactions it participates on.
 init([Partition]) ->
-    PreparedTx = open_table(Partition, prepared),
+    TxMetadata = open_table(Partition, prepared),
     CommittedTx = dict:new(),
+    %%true = ets:insert(TxMetadata, {committed_tx, dict:new()}),
     InMemoryStore = open_table(Partition, inmemory_store),
     
     clocksi_readitem_fsm:start_read_servers(Partition),
@@ -160,8 +159,8 @@ init([Partition]) ->
     end,
 
     {ok, #state{partition=Partition,
-                prepared_tx=PreparedTx,
                 committed_tx=CommittedTx,
+                tx_metadata=TxMetadata,
                 quorum = Quorum,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
@@ -214,14 +213,15 @@ handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
 
 handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
-                              committed_tx=CommittedTx,
                               if_replicate=IfReplicate,
+                              committed_tx=CommittedTx,
                               if_certify=IfCertify,
                               quorum=Quorum,
-                              prepared_tx=PreparedTx
+                              tx_metadata=TxMetadata
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
-    Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, 
+    %[{committed_tx, CommittedTx}] = ets:lookup(TxMetadata, committed_tx),
+    Result = prepare(Transaction, WriteSet, CommittedTx, TxMetadata, 
                         PrepareTime, IfCertify),
     case Result of
         {ok, NewPrepare} ->
@@ -252,33 +252,35 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
 
 handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
-                              committed_tx=CommittedTx,
                               if_replicate=IfReplicate,
                               if_certify=IfCertify,
                               quorum=Quorum,
-                              prepared_tx=PreparedTx
+                              committed_tx=CommittedTx,
+                              tx_metadata=TxMetadata
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
-    %lager:info("Before preparing"),
-    Result = prepare(Transaction, WriteSet, CommittedTx, PreparedTx, PrepareTime, IfCertify), 
+    %[{committed_tx, CommittedTx}] = ets:lookup(TxMetadata, committed_tx),
+    Result = prepare(Transaction, WriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify), 
     case Result of
         {ok, NewPrepare} ->
             ResultCommit = commit(Transaction, NewPrepare, WriteSet, CommittedTx, State),
             case ResultCommit of
-                {ok, {committed, NewCommittedTxs}} ->
+                {ok, {committed, NewCommittedTx}} ->
                     case IfReplicate of
                         true ->
                             TxId = Transaction#transaction.txn_id,
                             PendingRecord = {commit, Quorum-1, OriginalSender, 
                                 {committed, NewPrepare}, {Transaction, WriteSet}},
+                            %ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                            {noreply, State#state{committed_tx=NewCommittedTxs}};
+                            %{noreply, State};
+                            {noreply, State#state{committed_tx=NewCommittedTx}};
                         false ->
+                            %ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
                             riak_core_vnode:reply(OriginalSender, {committed, NewPrepare}),
-                            {noreply, State#state{committed_tx=NewCommittedTxs}}
+                            %{noreply, State}
+                            {noreply, State#state{committed_tx=NewCommittedTx}}
                         end;
-                %{error, timeout} ->
-                %    {reply, {error, timeout}, State};
                 {error, no_updates} ->
                     %gen_fsm:send_event(OriginalSender, no_tx_record),
                     riak_core_vnode:reply(OriginalSender, no_tx_record),
@@ -303,11 +305,11 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
 %% eventually.
 handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
-                      committed_tx=CommittedTx,
                       quorum=Quorum,
+                      committed_tx=CommittedTx,
                       if_replicate=IfReplicate
                       } = State) ->
-    %%lager:info("Commting in vnode"),
+    %[{committed_tx, CommittedTx}] = ets:lookup(TxMetadata, committed_tx),
     Result = commit(Transaction, TxCommitTime, Updates, CommittedTx, State),
     case Result of
         {ok, {committed,NewCommittedTx}} ->
@@ -316,9 +318,13 @@ handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
                     TxId = Transaction#transaction.txn_id,
                     PendingRecord = {commit, Quorum-1, Sender, 
                         committed, {Transaction, TxCommitTime, Updates}},
+                    %ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
+                    %{noreply, State};
                     {noreply, State#state{committed_tx=NewCommittedTx}};
                 false ->
+                    %%ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
+                    %{reply, committed, State}
                     {reply, committed, State#state{committed_tx=NewCommittedTx}}
             end;
         %{error, materializer_failure} ->
@@ -351,7 +357,7 @@ handle_command({abort, Transaction, Updates}, _Sender,
 
 %% @doc Return active transactions in prepare state with their preparetime
 handle_command({get_active_txns}, _Sender,
-               #state{prepared_tx=Prepared} = State) ->
+               #state{tx_metadata=Prepared} = State) ->
     ActiveTxs = ets:lookup(Prepared, active),
     {reply, {ok, ActiveTxs}, State};
 
@@ -407,16 +413,16 @@ async_send_msg(Msg, To) ->
     timer:sleep(SleepTime),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
-prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime, IfCertify)->
+prepare(Transaction, TxWriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify)->
     TxId = Transaction#transaction.txn_id,
-    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTx, IfCertify) of
+    case certification_check(TxId, TxWriteSet, CommittedTx, TxMetadata, IfCertify) of
         true ->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
 
-		    PrepList = set_prepared(PreparedTx, TxWriteSet, TxId,PrepareTime,[]),
+		    PrepList = set_prepared(TxMetadata, TxWriteSet, TxId,PrepareTime,[]),
 		    NewPrepare = now_microsec(erlang:now()),
-		    reset_prepared(PreparedTx, TxWriteSet, TxId,NewPrepare,PrepList),
+		    reset_prepared(TxMetadata, TxWriteSet, TxId,NewPrepare,PrepList),
 
 		    %LogRecord = #log_record{tx_id=TxId,
 			%		    op_type=prepare,
@@ -435,23 +441,23 @@ prepare(Transaction, TxWriteSet, CommittedTx, PreparedTx, PrepareTime, IfCertify
     end.
 
 
-set_prepared(_PreparedTx,[],_TxId,_Time,Acc) ->
+set_prepared(_TxMetadata,[],_TxId,_Time,Acc) ->
     lists:reverse(Acc);
-set_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId,Time,Acc) ->
-    ActiveTxs = case ets:lookup(PreparedTx, Key) of
+set_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId,Time,Acc) ->
+    ActiveTxs = case ets:lookup(TxMetadata, Key) of
 		    [] ->
 			[];
 		    [{Key, List}] ->
 			List
 		end,
-    true = ets:insert(PreparedTx, {Key, [{TxId, Time}|ActiveTxs]}),
-    set_prepared(PreparedTx,Rest,TxId,Time,[ActiveTxs|Acc]).
+    true = ets:insert(TxMetadata, {Key, [{TxId, Time}|ActiveTxs]}),
+    set_prepared(TxMetadata,Rest,TxId,Time,[ActiveTxs|Acc]).
 
-reset_prepared(_PreparedTx,[],_TxId,_Time,[]) ->
+reset_prepared(_TxMetadata,[],_TxId,_Time,[]) ->
     ok;
-reset_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId,Time,[ActiveTxs|Rest2]) ->
-    true = ets:insert(PreparedTx, {Key, [{TxId, Time}|ActiveTxs]}),
-    reset_prepared(PreparedTx,Rest,TxId,Time,Rest2).
+reset_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId,Time,[ActiveTxs|Rest2]) ->
+    true = ets:insert(TxMetadata, {Key, [{TxId, Time}|ActiveTxs]}),
+    reset_prepared(TxMetadata,Rest,TxId,Time,Rest2).
 
 
 commit(Transaction, TxCommitTime, Updates, CommittedTx, 
@@ -468,7 +474,6 @@ commit(Transaction, TxCommitTime, Updates, CommittedTx,
             %[Node] = log_utilities:get_preflist_from_key(Key),
             %case logging_vnode:append(Node,LogId,LogRecord) of
             %    {ok, _} ->
-    
                     update_store(Updates, Transaction, TxCommitTime, InMemoryStore),
                     NewDict = dict:store(Key, TxCommitTime, CommittedTx),
                     clean_and_notify(TxId,Updates,State),
@@ -490,29 +495,29 @@ commit(Transaction, TxCommitTime, Updates, CommittedTx,
 %%      1. notify all read_fsms that are waiting for this transaction to finish
 %%      2. clean the state of the transaction. Namely:
 %%      a. ActiteTxsPerKey,
-%%      b. PreparedTx
+%%      b. TxMetadata
 %%
 clean_and_notify(TxId, Updates, #state{
-			      prepared_tx=PreparedTx}) ->
-    clean_prepared(PreparedTx,Updates,TxId).
+			      tx_metadata=TxMetadata}) ->
+    clean_prepared(TxMetadata,Updates,TxId).
 
-clean_prepared(_PreparedTx,[],_TxId) ->
+clean_prepared(_TxMetadata,[],_TxId) ->
     ok;
-clean_prepared(PreparedTx,[{Key, _Type, _Op} | Rest],TxId) ->
-    case ets:lookup(PreparedTx, Key) of
+clean_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId) ->
+    case ets:lookup(TxMetadata, Key) of
         [{Key, ActiveTxs}] ->
             case ActiveTxs of
                 [_Prepared] ->
-                    true = ets:delete(PreparedTx, Key);
+                    true = ets:delete(TxMetadata, Key);
                 _ ->
                     NewActive = lists:keydelete(TxId,1,ActiveTxs),
-                    true = ets:insert(PreparedTx, {Key, NewActive})
+                    true = ets:insert(TxMetadata, {Key, NewActive})
             end;
         [] ->
             ok
     end,   
     %lager:info("Prepared transaction now is ~w", [NewActive]),
-    clean_prepared(PreparedTx,Rest,TxId).
+    clean_prepared(TxMetadata,Rest,TxId).
 
 %% @doc converts a tuple {MegaSecs,Secs,MicroSecs} into microseconds
 now_microsec({MegaSecs, Secs, MicroSecs}) ->
@@ -520,13 +525,13 @@ now_microsec({MegaSecs, Secs, MicroSecs}) ->
 
 %% @doc Performs a certification check when a transaction wants to move
 %%      to the prepared state.
-%certification_check(_TxId, _H, _CommittedTx, _PreparedTx) ->
+%certification_check(_TxId, _H, _CommittedTx, _TxMetadata) ->
 %    true.
 certification_check(_, _, _, _, false) ->
     true;
 certification_check(_, [], _, _, true) ->
     true;
-certification_check(TxId, [H|T], CommittedTx, PreparedTx, true) ->
+certification_check(TxId, [H|T], CommittedTx, TxMetadata, true) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     {Key, _Type, _} = H,
     case dict:find(Key, CommittedTx) of
@@ -535,9 +540,9 @@ certification_check(TxId, [H|T], CommittedTx, PreparedTx, true) ->
                 true ->
                     false;
                 false ->
-                    case check_prepared(TxId, PreparedTx, Key) of
+                    case check_prepared(TxId, TxMetadata, Key) of
                         true ->
-                            certification_check(TxId, T, CommittedTx, PreparedTx, true);
+                            certification_check(TxId, T, CommittedTx, TxMetadata, true);
                         false ->
                             false;
                         wait ->
@@ -545,9 +550,9 @@ certification_check(TxId, [H|T], CommittedTx, PreparedTx, true) ->
                     end
             end;
         error ->
-            case check_prepared(TxId, PreparedTx, Key) of
+            case check_prepared(TxId, TxMetadata, Key) of
                 true ->
-                    certification_check(TxId, T, CommittedTx, PreparedTx, true); 
+                    certification_check(TxId, T, CommittedTx, TxMetadata, true); 
                 false ->
                     false;
                 wait ->
@@ -555,9 +560,9 @@ certification_check(TxId, [H|T], CommittedTx, PreparedTx, true) ->
             end
     end.
 
-check_prepared(TxId, PreparedTx, Key) ->
+check_prepared(TxId, TxMetadata, Key) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
-    case ets:lookup(PreparedTx, Key) of
+    case ets:lookup(TxMetadata, Key) of
         [] ->
             true;
         [{Key, List}] ->
