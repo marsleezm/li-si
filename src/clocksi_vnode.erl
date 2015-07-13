@@ -211,7 +211,7 @@ handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
     Result = clocksi_readitem_fsm:check_partition_ready(Node,Partition,?READ_CONCURRENCY),
     {reply, Result, SD0};
 
-handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
+handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
                               committed_tx=CommittedTx,
@@ -221,15 +221,14 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     %[{committed_tx, CommittedTx}] = ets:lookup(TxMetadata, committed_tx),
-    Result = prepare(Transaction, WriteSet, CommittedTx, TxMetadata, 
+    Result = prepare(TxId, WriteSet, CommittedTx, TxMetadata, 
                         PrepareTime, IfCertify),
     case Result of
         {ok, NewPrepare} ->
             case IfReplicate of
                 true ->
-                    TxId = Transaction#transaction.txn_id,
                     PendingRecord = {prepare, Quorum-1, OriginalSender, 
-                            {prepared, NewPrepare}, {Transaction, WriteSet}},
+                            {prepared, NewPrepare}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State};
                 false ->
@@ -237,7 +236,7 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
                     {noreply, State}
             end;
         {error, wait_more} ->
-            spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
+            spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, no_updates} ->
@@ -250,7 +249,7 @@ handle_command({prepare, Transaction, WriteSet, OriginalSender}, _Sender,
     end;
 
 
-handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
+handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
                               if_certify=IfCertify,
@@ -260,17 +259,16 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     %[{committed_tx, CommittedTx}] = ets:lookup(TxMetadata, committed_tx),
-    Result = prepare(Transaction, WriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify), 
+    Result = prepare(TxId, WriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify), 
     case Result of
         {ok, NewPrepare} ->
-            ResultCommit = commit(Transaction, NewPrepare, WriteSet, CommittedTx, State),
+            ResultCommit = commit(TxId, NewPrepare, WriteSet, CommittedTx, State),
             case ResultCommit of
                 {ok, {committed, NewCommittedTx}} ->
                     case IfReplicate of
                         true ->
-                            TxId = Transaction#transaction.txn_id,
                             PendingRecord = {commit, Quorum-1, OriginalSender, 
-                                {committed, NewPrepare}, {Transaction, WriteSet}},
+                                {committed, NewPrepare}, {TxId, WriteSet}},
                             %ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                             %{noreply, State};
@@ -287,7 +285,7 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
                     {noreply, State}
             end;
         {error, wait_more}->
-            spawn(clocksi_vnode, async_send_msg, [{prepare, Transaction, 
+            spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, no_updates} ->
@@ -303,21 +301,20 @@ handle_command({single_commit, Transaction, WriteSet, OriginalSender}, _Sender,
 %% TODO: sending empty writeset to clocksi_downstream_generatro
 %% Just a workaround, need to delete downstream_generator_vnode
 %% eventually.
-handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
+handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
                       quorum=Quorum,
                       committed_tx=CommittedTx,
                       if_replicate=IfReplicate
                       } = State) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(TxMetadata, committed_tx),
-    Result = commit(Transaction, TxCommitTime, Updates, CommittedTx, State),
+    Result = commit(TxId, TxCommitTime, Updates, CommittedTx, State),
     case Result of
         {ok, {committed,NewCommittedTx}} ->
             case IfReplicate of
                 true ->
-                    TxId = Transaction#transaction.txn_id,
                     PendingRecord = {commit, Quorum-1, Sender, 
-                        committed, {Transaction, TxCommitTime, Updates}},
+                        committed, {TxId, TxCommitTime, Updates}},
                     %ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     %{noreply, State};
@@ -335,9 +332,8 @@ handle_command({commit, Transaction, TxCommitTime, Updates}, Sender,
             {reply, no_tx_record, State}
     end;
 
-handle_command({abort, Transaction, Updates}, _Sender,
+handle_command({abort, TxId, Updates}, _Sender,
                #state{partition=_Partition} = State) ->
-    TxId = Transaction#transaction.txn_id,
     case Updates of
         [_Something] -> 
             %LogId = log_utilities:get_logid_from_key(Key),
@@ -413,8 +409,7 @@ async_send_msg(Msg, To) ->
     timer:sleep(SleepTime),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
-prepare(Transaction, TxWriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify)->
-    TxId = Transaction#transaction.txn_id,
+prepare(TxId, TxWriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, TxMetadata, IfCertify) of
         true ->
             %case TxWriteSet of 
@@ -460,21 +455,20 @@ reset_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId,Time,[ActiveTxs|Rest2]
     reset_prepared(TxMetadata,Rest,TxId,Time,Rest2).
 
 
-commit(Transaction, TxCommitTime, Updates, CommittedTx, 
+commit(TxId, TxCommitTime, Updates, CommittedTx, 
                                 State=#state{inmemory_store=InMemoryStore})->
-    TxId = Transaction#transaction.txn_id,
     %DcId = dc_utilities:get_my_dc_id(),
     %LogRecord=#log_record{tx_id=TxId,
     %                      op_type=commit,
     %                      op_payload={{DcId, TxCommitTime},
-    %                                  Transaction#transaction.vec_snapshot_time}},
+    %                                  TxId#transaction.vec_snapshot_time}},
     case Updates of
         [{Key, _Type, _Value} | _Rest] -> 
             %LogId = log_utilities:get_logid_from_key(Key),
             %[Node] = log_utilities:get_preflist_from_key(Key),
             %case logging_vnode:append(Node,LogId,LogRecord) of
             %    {ok, _} ->
-                    update_store(Updates, Transaction, TxCommitTime, InMemoryStore),
+                    update_store(Updates, TxId, TxCommitTime, InMemoryStore),
                     NewDict = dict:store(Key, TxCommitTime, CommittedTx),
                     clean_and_notify(TxId,Updates,State),
                     {ok, {committed, NewDict}};
@@ -599,11 +593,11 @@ check_prepared(TxId, TxMetadata, Key) ->
 %%     end.
 
 -spec update_store(KeyValues :: [{key(), atom(), term()}],
-                          Transaction::tx(),TxCommitTime:: {term(), term()},
+                          TxId::txid(),TxCommitTime:: {term(), term()},
                                 InMemoryStore :: cache_id()) -> ok.
-update_store([], _Transaction, _TxCommitTime, _InMemoryStore) ->
+update_store([], _TxId, _TxCommitTime, _InMemoryStore) ->
     ok;
-update_store([{Key, Type, {Param, Actor}}|Rest], Transaction, TxCommitTime, InMemoryStore) ->
+update_store([{Key, Type, {Param, Actor}}|Rest], TxId, TxCommitTime, InMemoryStore) ->
     %lager:info("Store ~w",[InMemoryStore]),
     case ets:lookup(InMemoryStore, Key) of
         [] ->
@@ -612,7 +606,7 @@ update_store([{Key, Type, {Param, Actor}}|Rest], Transaction, TxCommitTime, InMe
             {ok, NewSnapshot} = Type:update(Param, Actor, Init),
             %lager:info("Updateing store for key ~w, value ~w firstly", [Key, Type:value(NewSnapshot)]),
             true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]}), 
-            update_store(Rest, Transaction, TxCommitTime, InMemoryStore);
+            update_store(Rest, TxId, TxCommitTime, InMemoryStore);
         [{Key, ValueList}] ->
       %      lager:info("Wrote ~w to key ~w with ~w",[Value, Key, ValueList]),
             {RemainList, _} = lists:split(min(20,length(ValueList)), ValueList),
@@ -620,7 +614,7 @@ update_store([{Key, Type, {Param, Actor}}|Rest], Transaction, TxCommitTime, InMe
             {ok, NewSnapshot} = Type:update(Param, Actor, First),
             %lager:info("Updateing store for key ~w, value ~w", [Key, Type:value(NewSnapshot)]),
             true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]}),
-            update_store(Rest, Transaction, TxCommitTime, InMemoryStore)
+            update_store(Rest, TxId, TxCommitTime, InMemoryStore)
     end,
     ok.
 
