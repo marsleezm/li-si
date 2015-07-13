@@ -23,7 +23,7 @@
 
 -export([create_transaction_record/1]).
 
--spec create_transaction_record(snapshot_time() | ignore) -> {tx(),txid()}.
+-spec create_transaction_record(snapshot_time() | ignore) -> txid().
 create_transaction_record(ClientClock) ->
     %% Seed the random because you pick a random read server, this is stored in the process state
     {A1,A2,A3} = now(),
@@ -34,7 +34,6 @@ create_transaction_record(ClientClock) ->
         _ ->
             get_snapshot_time(ClientClock)
     end,
-    %_DCID = dc_utilities:get_my_dc_id(),
     TransactionId = #tx_id{snapshot_time=SnapshotTime, server_pid=self()},
     TransactionId.
 

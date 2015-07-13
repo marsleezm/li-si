@@ -73,21 +73,21 @@ stop_read_servers(Partition) ->
     stop_read_servers_internal(Addr, Partition, ?READ_CONCURRENCY).
 
 
-read_data_item({Partition,Node},Key,Type,Transaction) ->
+read_data_item({Partition,Node},Key,Type,TxId) ->
     try
 	gen_server:call({global,generate_random_server_name(Node,Partition)},
-			{perform_read,Key,Type,Transaction},infinity)
+			{perform_read,Key,Type,TxId},infinity)
     catch
         _:Reason ->
             lager:error("Exception caught: ~p", [Reason]),
             {error, Reason}
     end.
 
-async_read_data_item({Partition,Node},Key,Type,Transaction) ->
+async_read_data_item({Partition,Node},Key,Type,TxId) ->
     %lager:info("Sending read for ~w",[Key]),
     try
 	gen_server:cast({global,generate_random_server_name(Node,Partition)},
-			{perform_read_cast, {async,self()}, Key, Type, Transaction})
+			{perform_read_cast, {async,self()}, Key, Type, TxId})
     catch
         _:Reason ->
             lager:error("Exception caught: ~p", [Reason]),
@@ -162,48 +162,47 @@ init([Partition, Id]) ->
 		snapshot_cache=SnapshotCache,
 		prepared_cache=PreparedCache,self=Self}}.
 
-handle_call({perform_read, Key, Type, Transaction},Coordinator,
+handle_call({perform_read, Key, Type, TxId},Coordinator,
 	    SD0=#state{snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
     %lager:info("Got read request for ~w", Key),
-    perform_read_internal({sync,Coordinator},Key,Type,Transaction, SnapshotCache,PreparedCache,Self),
+    perform_read_internal({sync,Coordinator},Key,Type,TxId, SnapshotCache,PreparedCache,Self),
     {noreply,SD0};
 
 handle_call({go_down},_Sender,SD0) ->
     {stop,shutdown,ok,SD0}.
 
-handle_cast({perform_read_cast, Coordinator, Key, Type, Transaction},
+handle_cast({perform_read_cast, Coordinator, Key, Type, TxId},
 	    SD0=#state{snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
-    perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self),
+    perform_read_internal(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self),
     {noreply,SD0}.
 
-perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self) ->
-    case check_clock(Key,Transaction,PreparedCache) of
+perform_read_internal(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self) ->
+    case check_clock(Key,TxId,PreparedCache) of
 	not_ready ->
         %lager:info("Clock not ready"),
-	    spin_wait(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self);
+	    spin_wait(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self);
 	ready ->
         %lager:info("Ready to read for key ~w to ~w",[Key, Coordinator]),
-	    return(Coordinator,Key,Type,Transaction,SnapshotCache)
+	    return(Coordinator,Key,Type,TxId,SnapshotCache)
     end.
 
-spin_wait(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self) ->
+spin_wait(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self) ->
     {message_queue_len,Length} = process_info(self(), message_queue_len),
     case Length of
 	0 ->
         %lager:info("Sleeping to wati for read ~w",[Key]),
 	    timer:sleep(?SPIN_WAIT),
-	    perform_read_internal(Coordinator,Key,Type,Transaction,SnapshotCache,PreparedCache,Self);
+	    perform_read_internal(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self);
 	_ ->
         %lager:info("Sending myself to read ~w",[Key]),
-	    gen_server:cast({global,Self},{perform_read_cast,Coordinator,Key,Type,Transaction})
+	    gen_server:cast({global,Self},{perform_read_cast,Coordinator,Key,Type,TxId})
     end.
 
 %% @doc check_clock: Compares its local clock with the tx timestamp.
 %%      if local clock is behind, it sleeps the fms until the clock
 %%      catches up. CLOCK-SI: clock skew.
 %%
-check_clock(Key,Transaction,PreparedCache) ->
-    TxId = Transaction#transaction.txn_id,
+check_clock(Key,TxId,PreparedCache) ->
     T_TS = TxId#tx_id.snapshot_time,
     Time = clocksi_vnode:now_microsec(erlang:now()),
     case T_TS > Time of
@@ -214,12 +213,11 @@ check_clock(Key,Transaction,PreparedCache) ->
 	    not_ready;
         false ->
         %lager:info("Clock ready"),
-	    check_prepared(Key,Transaction,PreparedCache)
+	    check_prepared(Key,TxId,PreparedCache)
     end.
 
 
-check_prepared(Key,Transaction,PreparedCache) ->
-    TxId = Transaction#transaction.txn_id,
+check_prepared(Key,TxId,PreparedCache) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     ActiveTxs = 
 	case ets:lookup(PreparedCache, Key) of
@@ -243,15 +241,14 @@ check_prepared_list(Key,SnapshotTime,[{_TxId,Time}|Rest]) ->
 
 %% @doc return:
 %%  - Reads and returns the log of specified Key using replication layer.
-return(Coordinator,Key, Type,Transaction, SnapshotCache) ->
-    VecSnapshotTime = Transaction#transaction.vec_snapshot_time,
+return(Coordinator,Key, Type,TxId, SnapshotCache) ->
     %lager:info("Returning for key ~w",[Key]),
     Reply = case ets:lookup(SnapshotCache, Key) of
                 [] ->
                     {ok, {Type,Type:new()}};
                 [{Key, ValueList}] ->
-    %lager:info("Key is ~w, Transaciton is ~w, Valuelist ~w", [Key, Transaction, ValueList]),
-                    MyClock = vectorclock:get_clock_of_dc(dc_utilities:get_my_dc_id(), VecSnapshotTime),
+    %lager:info("Key is ~w, Transaciton is ~w, Valuelist ~w", [Key, TxId, ValueList]),
+                    MyClock = TxId#tx_id.snapshot_time,
                     find_version(ValueList, MyClock, Type)
             end,
     case Coordinator of

@@ -151,12 +151,12 @@ init([Partition]) ->
     IfReplicate = antidote_config:get(do_repl),
     Quorum = antidote_config:get(quorum),
 
-    case IfReplicate of
-        true ->
-            repl_fsm_sup:start_fsm(Partition);
-        false ->
-            ok
-    end,
+    _ = case IfReplicate of
+                    true ->
+                        repl_fsm_sup:start_fsm(Partition);
+                    false ->
+                        ok
+                end,
 
     {ok, #state{partition=Partition,
                 committed_tx=CommittedTx,
@@ -239,9 +239,6 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
             spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
-        {error, no_updates} ->
-            riak_core_vnode:reply(OriginalSender, {error, no_tx_record}),
-            {noreply, State};
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, abort),
             %gen_fsm:send_event(OriginalSender, abort),
@@ -287,10 +284,6 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
         {error, wait_more}->
             spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
-            {noreply, State};
-        {error, no_updates} ->
-            %gen_fsm:send_event(OriginalSender, {error, no_tx_record}),
-            riak_core_vnode:reply(OriginalSender, {error, no_tx_record}),
             {noreply, State};
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, abort),
@@ -398,6 +391,7 @@ handle_exit(_Pid, _Reason, State) ->
 
 terminate(_Reason, #state{partition=Partition} = _State) ->
     ets:delete(get_cache_name(Partition,prepared)),
+    ets:delete(get_cache_name(Partition,inmemory_store)),
     clocksi_readitem_fsm:stop_read_servers(Partition),    
     ok.
 
@@ -430,9 +424,7 @@ prepare(TxId, TxWriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify)->
 	    false ->
 	        {error, write_conflict};
         wait ->
-            {error,  wait_more};
-		_ ->
-		    {error, no_updates}
+            {error,  wait_more}
     end.
 
 
