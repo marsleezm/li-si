@@ -219,24 +219,21 @@ check_clock(Key,TxId,PreparedCache) ->
 
 check_prepared(Key,TxId,PreparedCache) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
-    ActiveTxs = 
-	case ets:lookup(PreparedCache, Key) of
-	    [] ->
-		[];
-	    [{Key,AList}] ->
-		AList
-	end,
-    check_prepared_list(Key,SnapshotTime,ActiveTxs).
+    ActiveTx = 
+            case ets:lookup(PreparedCache, Key) of
+                [] ->
+                    [];
+                [{Key,AList}] ->
+                    AList
+            end,
+    check_prepared_list(SnapshotTime,ActiveTx).
 
-check_prepared_list(_Key,_SnapshotTime,[]) ->
-    ready;
-check_prepared_list(Key,SnapshotTime,[{_TxId,Time}|Rest]) ->
+check_prepared_list(SnapshotTime,{_TxId,Time}) ->
     case Time =< SnapshotTime of
-	true ->
-        %lager:info("Prepared not ready"),
-	    not_ready;
-	false ->
-	    check_prepared_list(Key,SnapshotTime,Rest)
+	    true ->
+	        not_ready;
+	    false ->
+            ready
     end.
 
 %% @doc return:

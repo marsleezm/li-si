@@ -30,8 +30,7 @@
          check_prepared/3,
          prepare/2,
          commit/3,
-         set_prepared/5,
-         reset_prepared/5,
+         set_prepared/4,
          async_send_msg/2,
          single_commit/2,
          abort/2,
@@ -329,17 +328,9 @@ handle_command({abort, TxId, Updates}, _Sender,
                #state{partition=_Partition} = State) ->
     case Updates of
         [_Something] -> 
-            %LogId = log_utilities:get_logid_from_key(Key),
-            %[Node] = log_utilities:get_preflist_from_key(Key),
-            %Result = logging_vnode:append(Node,LogId,{TxId, aborted}),
-            %case Result of
-            %    {ok, _} ->
-                    %lager:info("Trying to abort ~w with updates ~w", [TxId, Updates]),
-                    clean_and_notify(TxId, Updates, State),
-            %    {error, timeout} ->
-            %        clean_and_notify(TxId, Key, State)
-            %end,
-            {reply, ack_abort, State};
+            clean_and_notify(TxId, Updates, State),
+            {noreply, State};
+            %%{reply, ack_abort, State};
         [] ->
             {reply, {error, no_tx_record}, State}
     end;
@@ -409,9 +400,9 @@ prepare(TxId, TxWriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify)->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
 
-		    PrepList = set_prepared(TxMetadata, TxWriteSet, TxId,PrepareTime,[]),
+		    set_prepared(TxMetadata, TxWriteSet, TxId,PrepareTime),
 		    NewPrepare = now_microsec(erlang:now()),
-		    reset_prepared(TxMetadata, TxWriteSet, TxId,NewPrepare,PrepList),
+		    set_prepared(TxMetadata, TxWriteSet, TxId,NewPrepare),
 
 		    %LogRecord = #log_record{tx_id=TxId,
 			%		    op_type=prepare,
@@ -428,45 +419,20 @@ prepare(TxId, TxWriteSet, CommittedTx, TxMetadata, PrepareTime, IfCertify)->
     end.
 
 
-set_prepared(_TxMetadata,[],_TxId,_Time,Acc) ->
-    lists:reverse(Acc);
-set_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId,Time,Acc) ->
-    ActiveTxs = case ets:lookup(TxMetadata, Key) of
-		    [] ->
-			[];
-		    [{Key, List}] ->
-			List
-		end,
-    true = ets:insert(TxMetadata, {Key, [{TxId, Time}|ActiveTxs]}),
-    set_prepared(TxMetadata,Rest,TxId,Time,[ActiveTxs|Acc]).
-
-reset_prepared(_TxMetadata,[],_TxId,_Time,[]) ->
+set_prepared(_TxMetadata,[],_TxId,_Time) ->
     ok;
-reset_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId,Time,[ActiveTxs|Rest2]) ->
-    true = ets:insert(TxMetadata, {Key, [{TxId, Time}|ActiveTxs]}),
-    reset_prepared(TxMetadata,Rest,TxId,Time,Rest2).
-
+set_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId,Time) ->
+    true = ets:insert(TxMetadata, {Key, {TxId, Time}}),
+    set_prepared(TxMetadata,Rest,TxId,Time).
 
 commit(TxId, TxCommitTime, Updates, CommittedTx, 
                                 State=#state{inmemory_store=InMemoryStore})->
-    %DcId = dc_utilities:get_my_dc_id(),
-    %LogRecord=#log_record{tx_id=TxId,
-    %                      op_type=commit,
-    %                      op_payload={{DcId, TxCommitTime},
-    %                                  TxId#transaction.vec_snapshot_time}},
     case Updates of
         [{Key, _Type, _Value} | _Rest] -> 
-            %LogId = log_utilities:get_logid_from_key(Key),
-            %[Node] = log_utilities:get_preflist_from_key(Key),
-            %case logging_vnode:append(Node,LogId,LogRecord) of
-            %    {ok, _} ->
-                    update_store(Updates, TxId, TxCommitTime, InMemoryStore),
-                    NewDict = dict:store(Key, TxCommitTime, CommittedTx),
-                    clean_and_notify(TxId,Updates,State),
-                    {ok, {committed, NewDict}};
-            %    {error, timeout} ->
-            %        {error, timeout}
-            %end;
+            update_store(Updates, TxId, TxCommitTime, InMemoryStore),
+            NewDict = dict:store(Key, TxCommitTime, CommittedTx),
+            clean_and_notify(TxId,Updates,State),
+            {ok, {committed, NewDict}};
         _ -> 
             {error, no_updates}
     end.
@@ -491,18 +457,11 @@ clean_prepared(_TxMetadata,[],_TxId) ->
     ok;
 clean_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId) ->
     case ets:lookup(TxMetadata, Key) of
-        [{Key, ActiveTxs}] ->
-            case ActiveTxs of
-                [_Prepared] ->
-                    true = ets:delete(TxMetadata, Key);
-                _ ->
-                    NewActive = lists:keydelete(TxId,1,ActiveTxs),
-                    true = ets:insert(TxMetadata, {Key, NewActive})
-            end;
-        [] ->
+        [{Key, {TxId, _Time}}] ->
+            true = ets:delete(TxMetadata, Key);
+        _ ->
             ok
     end,   
-    %lager:info("Prepared transaction now is ~w", [NewActive]),
     clean_prepared(TxMetadata,Rest,TxId).
 
 %% @doc converts a tuple {MegaSecs,Secs,MicroSecs} into microseconds
