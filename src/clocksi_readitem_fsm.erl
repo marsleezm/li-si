@@ -164,7 +164,6 @@ init([Partition, Id]) ->
 
 handle_call({perform_read, Key, Type, TxId},Coordinator,
 	    SD0=#state{snapshot_cache=SnapshotCache,prepared_cache=PreparedCache,self=Self}) ->
-    %lager:info("Got read request for ~w", Key),
     perform_read_internal({sync,Coordinator},Key,Type,TxId, SnapshotCache,PreparedCache,Self),
     {noreply,SD0};
 
@@ -179,10 +178,8 @@ handle_cast({perform_read_cast, Coordinator, Key, Type, TxId},
 perform_read_internal(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self) ->
     case check_clock(Key,TxId,PreparedCache) of
 	not_ready ->
-        %lager:info("Clock not ready"),
 	    spin_wait(Coordinator,Key,Type,TxId,SnapshotCache,PreparedCache,Self);
 	ready ->
-        %lager:info("Ready to read for key ~w to ~w",[Key, Coordinator]),
 	    return(Coordinator,Key,Type,TxId,SnapshotCache)
     end.
 
@@ -219,21 +216,16 @@ check_clock(Key,TxId,PreparedCache) ->
 
 check_prepared(Key,TxId,PreparedCache) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
-    ActiveTx = 
-            case ets:lookup(PreparedCache, Key) of
-                [] ->
-                    [];
-                [{Key,AList}] ->
-                    AList
-            end,
-    check_prepared_list(SnapshotTime,ActiveTx).
-
-check_prepared_list(SnapshotTime,{_TxId,Time}) ->
-    case Time =< SnapshotTime of
-	    true ->
-	        not_ready;
-	    false ->
-            ready
+    case ets:lookup(PreparedCache, Key) of
+        [] ->
+            ready;
+        [{Key, {_TxId, Time}}] ->
+            case Time =< SnapshotTime of
+                true ->
+                    not_ready;
+                false ->
+                    ready
+            end
     end.
 
 %% @doc return:
@@ -244,7 +236,7 @@ return(Coordinator,Key, Type,TxId, SnapshotCache) ->
                 [] ->
                     {ok, {Type,Type:new()}};
                 [{Key, ValueList}] ->
-    %lager:info("Key is ~w, Transaciton is ~w, Valuelist ~w", [Key, TxId, ValueList]),
+                    lager:info("Key is ~w, Transaciton is ~w, Valuelist ~w", [Key, TxId, ValueList]),
                     MyClock = TxId#tx_id.snapshot_time,
                     find_version(ValueList, MyClock, Type)
             end,

@@ -149,9 +149,9 @@ decode_au_txn_ops(Ops) ->
 
 %% Counter
 decode_au_txn_op(#fpbatomicupdatetxnop{counterinc=#fpbincrementreq{key=Key, amount=Amount}}) ->
-    {update, Key, riak_dt_pncounter, {{increment, Amount}, node()}};
+    [{update, Key, riak_dt_pncounter, {{increment, Amount}, node()}}];
 decode_au_txn_op(#fpbatomicupdatetxnop{counterdec=#fpbdecrementreq{key=Key, amount=Amount}}) ->
-    {update, Key, riak_dt_pncounter, {{decrement, Amount}, node()}};
+    [{update, Key, riak_dt_pncounter, {{decrement, Amount}, node()}}];
 %% Set
 decode_au_txn_op(#fpbatomicupdatetxnop{setupdate=#fpbsetupdatereq{key=Key, adds=AddElems, rems=RemElems}}) ->
     Adds = lists:map(fun(X) ->
@@ -162,8 +162,8 @@ decode_au_txn_op(#fpbatomicupdatetxnop{setupdate=#fpbsetupdatereq{key=Key, adds=
                       end, RemElems),
     Op = case length(Adds) of
              0 -> [];
-             1 -> {update, Key, riak_dt_orset, {{add,Adds}, node()}};
-             _ -> {update, Key, riak_dt_orset, {{add_all, Adds},node()}}
+             1 -> [{update, Key, riak_dt_orset, {{add,Adds}, node()}}];
+             _ -> [{update, Key, riak_dt_orset, {{add_all, Adds},node()}}]
          end,
     case length(Rems) of
         0 -> Op;

@@ -510,8 +510,7 @@ check_prepared(TxId, TxMetadata, Key) ->
     case ets:lookup(TxMetadata, Key) of
         [] ->
             true;
-        [{Key, List}] ->
-            [{_TxId1, PrepareTime}|_] = List,
+        [{Key, {_TxId1, PrepareTime}}] ->
             case PrepareTime > SnapshotTime of
                 true ->
                     %lager:info("Has to abort for Key ~w", [Key]),
