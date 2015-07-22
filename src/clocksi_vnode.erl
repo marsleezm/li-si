@@ -26,22 +26,26 @@
 	    read_data_item/4,
 	    async_read_data_item/4,
 	    get_cache_name/2,
-         update_store/4,
-         check_prepared/3,
-         prepare/2,
-         commit/3,
-         set_prepared/4,
-         async_send_msg/2,
-         single_commit/2,
-         abort/2,
-         now_microsec/1,
-         init/1,
-         terminate/2,
-         handle_command/3,
-         is_empty/1,
-         delete/1,
-         open_table/2,
-	 check_tables_ready/0,
+        set_prepared/4,
+        async_send_msg/2,
+        update_store/4,
+
+        check_prepared/3,
+        prepare/2,
+        commit/3,
+        single_commit/2,
+        abort/2,
+        now_microsec/1,
+        init/1,
+        terminate/2,
+        handle_command/3,
+        is_empty/1,
+        delete/1,
+        open_table/2,
+	    check_tables_ready/0,
+	    check_prepared_empty/0]).
+
+-export([
          handle_handoff_command/3,
          handoff_starting/2,
          handoff_cancelled/1,
@@ -186,6 +190,26 @@ check_table_ready([{Partition,Node}|Rest]) ->
 	    false
     end.
 
+check_prepared_empty() ->
+    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
+    PartitionList = chashbin:to_list(CHBin),
+    check_prepared_empty(PartitionList).
+
+check_prepared_empty([]) ->
+    ok;
+check_prepared_empty([{Partition,Node}|Rest]) ->
+    Result = riak_core_vnode_master:sync_command({Partition,Node},
+						 {check_prepared_empty},
+						 ?CLOCKSI_MASTER,
+						 infinity),
+    case Result of
+	    true ->
+            ok;
+	    false ->
+            lager:info("Prepared not empty!")
+    end,
+	check_prepared_empty(Rest).
+
 open_table(Partition, Name) ->
     try
 	ets:new(get_cache_name(Partition,Name),
@@ -205,6 +229,16 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
 	     end,
     {reply, Result, SD0};
     
+handle_command({check_prepared_empty},_Sender,SD0=#state{tx_metadata=TxMetadata}) ->
+    PreparedList = ets:tab2list(TxMetadata),
+    case length(PreparedList) of
+		 0 ->
+            {reply, true, SD0};
+		 _ ->
+            lager:wanring("Not empty!! ~w", [PreparedList]),
+            {reply, false, SD0}
+    end;
+
 handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
     Node = node(),
     Result = clocksi_readitem_fsm:check_partition_ready(Node,Partition,?READ_CONCURRENCY),
