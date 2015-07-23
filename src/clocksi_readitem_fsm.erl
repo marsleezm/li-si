@@ -236,7 +236,6 @@ return(Coordinator,Key, Type,TxId, SnapshotCache) ->
                 [] ->
                     {ok, {Type,Type:new()}};
                 [{Key, ValueList}] ->
-                    lager:info("Key is ~w, Transaciton is ~w, Valuelist ~w", [Key, TxId, ValueList]),
                     MyClock = TxId#tx_id.snapshot_time,
                     find_version(ValueList, MyClock, Type)
             end,

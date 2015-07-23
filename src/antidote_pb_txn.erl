@@ -80,7 +80,7 @@ process(#fpbgeneraltxnreq{ops = Ops}, State) ->
             FlattenedList = lists:flatten(Updates),
             ReadReqs = lists:filter(fun(Op) -> case Op of 
                             {update, _, _, _} -> false; {read, _, _} -> true end end, FlattenedList),
-            Zipped = lists:zip(ReadReqs, ReadSet),
+            Zipped = lists:zip(ReadReqs, ReadSet), 
             Reply = encode_snapshot_read_response(Zipped),
             {reply, #fpbsnapshotreadtxnresp{success=true,
                                             clock= term_to_binary(CommitTime),
@@ -109,9 +109,10 @@ process_stream(_,_,State) ->
     {ignore, State}.
 
 decode_general_txn(Ops) ->
-    lists:foldl(fun(#fpbgeneraltxnlist{op=OpList}, Acc) -> 
+    TList = lists:foldl(fun(#fpbgeneraltxnlist{op=OpList}, Acc) -> 
             [lists:map(fun(Op) -> decode_general_txn_op(Op) end, OpList)|Acc] 
-            end, [], Ops).
+            end, [], Ops),
+    lists:reverse(TList).
     
 %% Counter
 decode_general_txn_op(#fpbgeneraltxnop{counterinc=#fpbincrementreq{key=Key, amount=Amount}}) ->

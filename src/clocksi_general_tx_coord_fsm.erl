@@ -87,6 +87,7 @@
 	  prepare_time :: non_neg_integer(),
 	  commit_time :: non_neg_integer(),
       updated_partitions :: dict(),
+      final_read_set :: [],
       read_set :: [],
       causal_clock :: non_neg_integer(),
 	  state :: active | prepared | committing | committed | undefined | aborted}).
@@ -112,10 +113,12 @@ stop(Pid) -> gen_fsm:sync_send_all_state_event(Pid,stop).
 
 %% @doc Initialize the state.
 init([From, ClientClock, Operations]) ->
+    random:seed(now()),
     SD = #state{
             causal_clock = ClientClock,
             operations = Operations,
             updated_partitions = dict:new(),
+            final_read_set=[],
             read_set = [],
             from = From,
             prepare_time=0
@@ -126,9 +129,14 @@ init([From, ClientClock, Operations]) ->
 %% @doc Contact the leader computed in the prepare state for it to execute the
 %%      operation, wait for it to finish (synchronous) and go to the prepareOP
 %%       to execute the next operation.
+execute_batch_ops(abort, SD) ->
+    execute_batch_ops(timeout, SD);
+
+execute_batch_ops({prepared, _}, SD) ->
+    execute_batch_ops(timeout, SD);
+
 execute_batch_ops(timeout, 
            SD=#state{causal_clock=CausalClock,
-                    read_set=ReadSet,
                     operations=Operations
 		      }) ->
     TxId = tx_utilities:create_transaction_record(CausalClock),
@@ -170,21 +178,21 @@ execute_batch_ops(timeout,
                             {UpdatedParts1, RSet, Buffer1}
                     end
                 end,
-    {WriteSet1, ReadSet1, _} = lists:foldl(ProcessOp, {dict:new(), ReadSet, dict:new()}, CurrentOps),
+    {WriteSet1, ReadSet1, _} = lists:foldl(ProcessOp, {dict:new(), [], dict:new()}, CurrentOps),
     %lager:info("Operations are ~w, WriteSet is ~w, ReadSet is ~w",[CurrentOps, WriteSet1, ReadSet1]),
     case dict:size(WriteSet1) of
         0->
-            reply_to_client(SD#state{state=committed,  
+            reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, 
                 commit_time=clocksi_vnode:now_microsec(now())});
         1->
             UpdatedPart = dict:to_list(WriteSet1),
             ?CLOCKSI_VNODE:single_commit(UpdatedPart, TxId),
             {next_state, single_committing,
-            SD#state{state=committing, num_to_ack=1, read_set=ReadSet1}};
+            SD#state{state=committing, num_to_ack=1, read_set=ReadSet1, tx_id=TxId}};
         N->
             ?CLOCKSI_VNODE:prepare(WriteSet1, TxId),
             {next_state, receive_prepared, SD#state{num_to_ack=N, state=prepared,
-                 updated_partitions=WriteSet1, read_set=ReadSet1}}
+                 updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
     end.
 
 %% @doc in this state, the fsm waits for prepare_time from each updated
@@ -265,23 +273,24 @@ abort({prepared, _}, SD0=#state{tx_id=TxId,
 %% @doc when the transaction has committed or aborted,
 %%       a reply is sent to the client that started the tx_id.
 reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet,
-                commit_time=CommitTime, operations=Operations}) ->
+                final_read_set=FinalReadSet, commit_time=CommitTime, operations=Operations}) ->
     case TxState of
         committed ->
             case length(Operations) of 
                 1 ->
-                    %lager:info("Finishing txn"),
-                    From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime}},
+                    RRSet = lists:reverse(lists:flatten([ReadSet|FinalReadSet])),
+                    From ! {ok, {TxId, RRSet, CommitTime}},
                     {stop, normal, SD};
                 _ ->
-                    %lager:info("Continuing executing txn"),
                     [_ExecutedOps|RestOps] = Operations,
                     {next_state, execute_batch_ops, SD#state{operations=RestOps,
-                        causal_clock=CommitTime}, 0}
+                        final_read_set=[ReadSet|FinalReadSet], causal_clock=CommitTime}, 0}
             end;
         aborted ->
-            %lager:info("Retrying txn"),
+            timer:sleep(random:uniform(10)),
             {next_state, execute_batch_ops, SD, 0}
+            %From ! {error, commit_fail},
+            %{stop, normal, SD}
     end.
 
 %% =============================================================================

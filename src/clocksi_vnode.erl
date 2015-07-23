@@ -235,7 +235,7 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{tx_metadata=TxMetadata}
 		 0 ->
             {reply, true, SD0};
 		 _ ->
-            lager:wanring("Not empty!! ~w", [PreparedList]),
+            lager:warning("Not empty!! ~w", [PreparedList]),
             {reply, false, SD0}
     end;
 
@@ -487,6 +487,7 @@ clean_and_notify(TxId, Updates, #state{
 			      tx_metadata=TxMetadata}) ->
     clean_prepared(TxMetadata,Updates,TxId).
 
+
 clean_prepared(_TxMetadata,[],_TxId) ->
     ok;
 clean_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId) ->
@@ -497,6 +498,7 @@ clean_prepared(TxMetadata,[{Key, _Type, _Op} | Rest],TxId) ->
             ok
     end,   
     clean_prepared(TxMetadata,Rest,TxId).
+
 
 %% @doc converts a tuple {MegaSecs,Secs,MicroSecs} into microseconds
 now_microsec({MegaSecs, Secs, MicroSecs}) ->
@@ -550,12 +552,12 @@ check_prepared(TxId, TxMetadata, Key) ->
                     %lager:info("Has to abort for Key ~w", [Key]),
                     false;
                 false ->
-                    case random:uniform(2) of
-                        1 ->
-                            false;
-                        2 ->
-                            wait  
-                    end
+                    %case random:uniform(2) of
+                    %    1 ->
+                            false
+                    %    2 ->
+                    %        wait  
+                    %end
             end
     end.
 
