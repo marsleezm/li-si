@@ -348,7 +348,7 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                 false ->
                     %%ets:insert(TxMetadata, {committed_tx, NewCommittedTx}),
                     %{reply, committed, State}
-                    {reply, committed, State#state{committed_tx=NewCommittedTx}}
+                    {noreply, State#state{committed_tx=NewCommittedTx}}
             end;
         %{error, materializer_failure} ->
         %    {reply, {error, materializer_failure}, State};
