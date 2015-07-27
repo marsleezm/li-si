@@ -63,7 +63,6 @@
          receive_prepared/2,
          single_committing/2,
          committing/2,
-         receive_committed/2,
          abort/2,
          reply_to_client/1]).
 
@@ -233,25 +232,12 @@ committing(timeout, SD0=#state{tx_id = TxId,
     case dict:size(UpdatedPartitions) of
         0 ->
             reply_to_client(SD0#state{state=committed});
-        N ->
-            ?CLOCKSI_VNODE:commit(UpdatedPartitions, TxId, Commit_time),
-            {next_state, receive_committed,
-             SD0#state{num_to_ack=N, state=committing}}
-    end.
-
-
-%% @doc the fsm waits for acks indicating that each partition has successfully
-%%	committed the tx and finishes operation.
-%%      Should we retry sending the committed message if we don't receive a
-%%      reply from every partition?
-%%      What delivery guarantees does sending messages provide?
-receive_committed(committed, S0=#state{num_to_ack= NumToAck}) ->
-    case NumToAck of
-        1 ->
-            reply_to_client(S0#state{state=committed});
         _ ->
-           {next_state, receive_committed, S0#state{num_to_ack= NumToAck-1}}
+            ?CLOCKSI_VNODE:commit(UpdatedPartitions, TxId, Commit_time),
+            reply_to_client(SD0#state{state=committed})
     end.
+
+
 
 %% @doc when an error occurs or an updated partition 
 %% does not pass the certification check, the transaction aborts.
