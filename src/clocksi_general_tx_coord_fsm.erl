@@ -58,12 +58,10 @@
          terminate/3]).
 
 %% States
--export([execute_batch_ops/2,
+-export([start_execute_txns/2,
          finish_op/3,
          receive_prepared/2,
          single_committing/2,
-         committing/2,
-         abort/2,
          reply_to_client/1]).
 
 %%---------------------------------------------------------------------
@@ -122,20 +120,16 @@ init([From, ClientClock, Operations]) ->
             from = From,
             prepare_time=0
            },
-    {ok, execute_batch_ops, SD, 0}.
+    {ok, start_execute_txns, SD, 0}.
 
 
 %% @doc Contact the leader computed in the prepare state for it to execute the
 %%      operation, wait for it to finish (synchronous) and go to the prepareOP
 %%       to execute the next operation.
-execute_batch_ops(abort, SD) ->
-    execute_batch_ops(timeout, SD);
+start_execute_txns(timeout, SD) ->
+    execute_batch_ops(SD).
 
-execute_batch_ops({prepared, _}, SD) ->
-    execute_batch_ops(timeout, SD);
-
-execute_batch_ops(timeout, 
-           SD=#state{causal_clock=CausalClock,
+execute_batch_ops(SD=#state{causal_clock=CausalClock,
                     operations=Operations
 		      }) ->
     TxId = tx_utilities:create_transaction_record(CausalClock),
@@ -189,6 +183,7 @@ execute_batch_ops(timeout,
             {next_state, single_committing,
             SD#state{state=committing, num_to_ack=1, read_set=ReadSet1, tx_id=TxId}};
         N->
+            %lager:info("Txn ~w , write set size ~w",[TxId, N]),
             ?CLOCKSI_VNODE:prepare(WriteSet1, TxId),
             {next_state, receive_prepared, SD#state{num_to_ack=N, state=prepared,
                  updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
@@ -197,36 +192,45 @@ execute_batch_ops(timeout,
 %% @doc in this state, the fsm waits for prepare_time from each updated
 %%      partitions in order to compute the final tx timestamp (the maximum
 %%      of the received prepare_time).
-receive_prepared({prepared, ReceivedPrepareTime},
-                 S0=#state{num_to_ack=NumToAck,
+receive_prepared({prepared, TxId, ReceivedPrepareTime},
+                 S0=#state{num_to_ack=NumToAck, tx_id=TxId,
                             prepare_time=PrepareTime}) ->
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     case NumToAck of 
         1 ->
-            {next_state, committing,
-                S0#state{prepare_time=MaxPrepareTime, commit_time=MaxPrepareTime, state=committing}, 0};
+            send_commit(S0#state{prepare_time=MaxPrepareTime, commit_time=MaxPrepareTime, state=committing});
         _ ->
+            %lager:info("Txn ~w , Got reply ~w, NumtoAck ~w",[TxId, ReceivedPrepareTime, NumToAck]),
             {next_state, receive_prepared,
              S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime}}
     end;
 
-receive_prepared(abort, S0) ->
-    {next_state, abort, S0, 0};
+receive_prepared({prepared, _, _}, S0) ->
+    {next_state, receive_prepared, S0};
+
+receive_prepared({abort, TxId}, S0=#state{tx_id=TxId}) ->
+    abort(S0);
+
+receive_prepared({abort, _}, S0) ->
+    {next_state, receive_prepared, S0};
 
 receive_prepared(timeout, S0) ->
-    {next_state, abort, S0, 0}.
+    abort(S0).
 
 single_committing({committed, CommitTime}, S0=#state{from=_From}) ->
     reply_to_client(S0#state{prepare_time=CommitTime, commit_time=CommitTime, state=committed});
     
-single_committing(abort, S0=#state{from=_From}) ->
+single_committing({abort, TxId}, S0=#state{from=_From, tx_id=TxId}) ->
+    abort(S0);
+
+single_committing(_, S0=#state{from=_From}) ->
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc after receiving all prepare_times, send the commit message to all
 %%      updated partitions, and go to the "receive_committed" state.
 %%      This state is used when no commit message from the client is
 %%      expected 
-committing(timeout, SD0=#state{tx_id = TxId,
+send_commit(SD0=#state{tx_id = TxId,
                               updated_partitions=UpdatedPartitions,
                               commit_time=Commit_time}) ->
     case dict:size(UpdatedPartitions) of
@@ -241,20 +245,10 @@ committing(timeout, SD0=#state{tx_id = TxId,
 
 %% @doc when an error occurs or an updated partition 
 %% does not pass the certification check, the transaction aborts.
-abort(timeout, SD0=#state{tx_id = TxId,
-                          updated_partitions=UpdatedPartitions}) ->
-    ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
-    reply_to_client(SD0#state{state=aborted});
-
-abort(abort, SD0=#state{tx_id = TxId,
-                        updated_partitions=UpdatedPartitions}) ->
-    ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
-    reply_to_client(SD0#state{state=aborted});
-
-abort({prepared, _}, SD0=#state{tx_id=TxId,
-                        updated_partitions=UpdatedPartitions}) ->
+abort(SD0=#state{tx_id = TxId, updated_partitions=UpdatedPartitions}) ->
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted}).
+
 
 %% @doc when the transaction has committed or aborted,
 %%       a reply is sent to the client that started the tx_id.
@@ -269,12 +263,12 @@ reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet
                     {stop, normal, SD};
                 _ ->
                     [_ExecutedOps|RestOps] = Operations,
-                    {next_state, execute_batch_ops, SD#state{operations=RestOps,
-                        final_read_set=[ReadSet|FinalReadSet], causal_clock=CommitTime}, 0}
+                    execute_batch_ops(SD#state{operations=RestOps,
+                        final_read_set=[ReadSet|FinalReadSet], causal_clock=CommitTime})
             end;
         aborted ->
             timer:sleep(random:uniform(10)),
-            {next_state, execute_batch_ops, SD, 0}
+            execute_batch_ops(SD)
             %From ! {error, commit_fail},
             %{stop, normal, SD}
     end.

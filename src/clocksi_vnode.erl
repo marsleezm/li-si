@@ -291,11 +291,11 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
             case IfReplicate of
                 true ->
                     PendingRecord = {prepare, Quorum-1, OriginalSender, 
-                            {prepared, NewPrepare}, {TxId, WriteSet}},
+                            {prepared, TxId, NewPrepare}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State};
                 false ->
-                    riak_core_vnode:reply(OriginalSender, {prepared, NewPrepare}),
+                    riak_core_vnode:reply(OriginalSender, {prepared, TxId, NewPrepare}),
                     {noreply, State}
             end;
         {error, wait_more} ->
@@ -303,7 +303,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, write_conflict} ->
-            riak_core_vnode:reply(OriginalSender, abort),
+            riak_core_vnode:reply(OriginalSender, {abort, TxId}),
             %gen_fsm:send_event(OriginalSender, abort),
             {noreply, State}
     end;
@@ -349,7 +349,7 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, write_conflict} ->
-            riak_core_vnode:reply(OriginalSender, abort),
+            riak_core_vnode:reply(OriginalSender, {abort, TxId}),
             %gen_fsm:send_event(OriginalSender, abort),
             {noreply, State}
     end;
@@ -391,12 +391,12 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
 handle_command({abort, TxId, Updates}, _Sender,
                #state{partition=_Partition} = State) ->
     case Updates of
-        [_Something] -> 
-            clean_and_notify(TxId, Updates, State),
-            {noreply, State};
-            %%{reply, ack_abort, State};
         [] ->
-            {reply, {error, no_tx_record}, State}
+            {reply, {error, no_tx_record}, State};
+        _ -> 
+            clean_and_notify(TxId, Updates, State),
+            {noreply, State}
+            %%{reply, ack_abort, State};
     end;
 
 %% @doc Return active transactions in prepare state with their preparetime
