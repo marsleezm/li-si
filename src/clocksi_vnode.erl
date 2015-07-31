@@ -42,8 +42,10 @@
         is_empty/1,
         delete/1,
         open_table/2,
+    
 	    check_tables_ready/0,
-	    check_prepared_empty/0]).
+	    check_prepared_empty/0,
+        print_stat/0]).
 
 -export([
          handle_handoff_command/3,
@@ -74,7 +76,10 @@
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 quorum :: non_neg_integer(),
-                inmemory_store :: cache_id()}).
+                inmemory_store :: cache_id(),
+                %Statistics
+                num_aborted :: non_neg_integer(),
+                num_committed :: non_neg_integer()}).
 
 %%%===================================================================
 %%% API
@@ -166,7 +171,9 @@ init([Partition]) ->
                 quorum = Quorum,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
-                inmemory_store=InMemoryStore}}.
+                inmemory_store=InMemoryStore,
+                num_aborted = 0,
+                num_committed = 0}}.
 
 
 check_tables_ready() ->
@@ -188,6 +195,20 @@ check_table_ready([{Partition,Node}|Rest]) ->
 	false ->
 	    false
     end.
+
+print_stat() ->
+    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
+    PartitionList = chashbin:to_list(CHBin),
+    print_stat(PartitionList, {0,0}).
+
+print_stat([], {CommitAcc, AbortAcc}) ->
+    lager:info("Total number committed is ~w, total number committed is ~w",[CommitAcc, AbortAcc]);
+print_stat([{Partition,Node}|Rest], {CommitAcc, AbortAcc}) ->
+    {Commit, Abort} = riak_core_vnode_master:sync_command({Partition,Node},
+						 {print_stat},
+						 ?CLOCKSI_MASTER,
+						 infinity),
+	print_stat(Rest, {CommitAcc+Commit, AbortAcc+Abort}).
 
 check_prepared_empty() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
@@ -227,6 +248,11 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
 		     true
 	     end,
     {reply, Result, SD0};
+
+handle_command({print_stat},_Sender,SD0=#state{partition=Partition, num_aborted=NumAborted,
+                    num_committed=NumCommitted}) ->
+    lager:info("~w: committed is ~w, aborted is ~w",[Partition, NumCommitted, NumAborted]),
+    {reply, {NumCommitted, NumAborted}, SD0};
     
 handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTxs}) ->
     PreparedList = ets:tab2list(PreparedTxs),
@@ -315,7 +341,8 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                               if_certify=IfCertify,
                               quorum=Quorum,
                               committed_tx=CommittedTx,
-                              prepared_txs=PreparedTxs
+                              prepared_txs=PreparedTxs,
+                              num_committed=NumCommitted
                               }) ->
     PrepareTime = now_microsec(erlang:now()),
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
@@ -332,12 +359,14 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                             %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                             %{noreply, State};
-                            {noreply, State#state{committed_tx=NewCommittedTx}};
+                            {noreply, State#state{committed_tx=NewCommittedTx, 
+                                    num_committed=NumCommitted+1}};
                         false ->
                             %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                             riak_core_vnode:reply(OriginalSender, {committed, NewPrepare}),
                             %{noreply, State}
-                            {noreply, State#state{committed_tx=NewCommittedTx}}
+                            {noreply, State#state{committed_tx=NewCommittedTx,
+                                    num_committed=NumCommitted+1}}
                         end;
                 {error, no_updates} ->
                     %gen_fsm:send_event(OriginalSender, no_tx_record),
@@ -361,7 +390,8 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
                       quorum=Quorum,
                       committed_tx=CommittedTx,
-                      if_replicate=IfReplicate
+                      if_replicate=IfReplicate,
+                      num_committed=NumCommitted
                       } = State) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
     Result = commit(TxId, TxCommitTime, Updates, CommittedTx, State),
@@ -374,11 +404,13 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                     %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     %{noreply, State};
-                    {noreply, State#state{committed_tx=NewCommittedTx}};
+                    {noreply, State#state{committed_tx=NewCommittedTx,
+                            num_committed=NumCommitted+1}};
                 false ->
                     %%ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                     %{reply, committed, State}
-                    {noreply, State#state{committed_tx=NewCommittedTx}}
+                    {noreply, State#state{committed_tx=NewCommittedTx,
+                            num_committed=NumCommitted+1}}
             end;
         %{error, materializer_failure} ->
         %    {reply, {error, materializer_failure}, State};
@@ -389,13 +421,13 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
     end;
 
 handle_command({abort, TxId, Updates}, _Sender,
-               #state{partition=_Partition} = State) ->
+               #state{partition=_Partition, num_aborted=NumAborted} = State) ->
     case Updates of
         [] ->
             {reply, {error, no_tx_record}, State};
         _ -> 
             clean_and_notify(TxId, Updates, State),
-            {noreply, State}
+            {noreply, State#state{num_aborted=NumAborted+1}}
             %%{reply, ack_abort, State};
     end;
 
