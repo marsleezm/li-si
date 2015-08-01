@@ -31,6 +31,7 @@
         update_store/4,
 
         check_prepared/3,
+        certification_check/5,
         prepare/2,
         commit/3,
         single_commit/2,
@@ -78,6 +79,8 @@
                 quorum :: non_neg_integer(),
                 inmemory_store :: cache_id(),
                 %Statistics
+                total_time :: non_neg_integer(),
+                prepare_count :: non_neg_integer(),
                 num_aborted :: non_neg_integer(),
                 num_cert_fail :: non_neg_integer(),
                 num_committed :: non_neg_integer()}).
@@ -173,6 +176,8 @@ init([Partition]) ->
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
                 inmemory_store=InMemoryStore,
+                total_time = 0, 
+                prepare_count = 0, 
                 num_aborted = 0,
                 num_cert_fail = 0,
                 num_committed = 0}}.
@@ -199,17 +204,17 @@ check_table_ready([{Partition,Node}|Rest]) ->
 print_stat() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
     PartitionList = chashbin:to_list(CHBin),
-    print_stat(PartitionList, {0,0,0}).
+    print_stat(PartitionList, {0,0,0,0,0}).
 
-print_stat([], {CommitAcc, AbortAcc, CertFailAcc}) ->
-    lager:info("Total number committed is ~w, total number aborted is ~w, cer fail is ~w",
-                [CommitAcc, AbortAcc, CertFailAcc]);
-print_stat([{Partition,Node}|Rest], {CommitAcc, AbortAcc, CertFailAcc}) ->
-    {Commit, Abort, Cert} = riak_core_vnode_master:sync_command({Partition,Node},
+print_stat([], {CommitAcc, AbortAcc, CertFailAcc, TimeAcc, CntAcc}) ->
+    lager:info("Total number committed is ~w, total number aborted is ~w, cer fail is ~w, Avg time is ~w",
+                [CommitAcc, AbortAcc, CertFailAcc, TimeAcc div CntAcc]);
+print_stat([{Partition,Node}|Rest], {CommitAcc, AbortAcc, CertFailAcc, TimeAcc, CntAcc}) ->
+    {Commit, Abort, Cert, TimeA, CntA} = riak_core_vnode_master:sync_command({Partition,Node},
 						 {print_stat},
 						 ?CLOCKSI_MASTER,
 						 infinity),
-	print_stat(Rest, {CommitAcc+Commit, AbortAcc+Abort, CertFailAcc+Cert}).
+	print_stat(Rest, {CommitAcc+Commit, AbortAcc+Abort, CertFailAcc+Cert, TimeAcc+TimeA, CntAcc+CntA}).
 
 check_prepared_empty() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
@@ -251,10 +256,10 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
     {reply, Result, SD0};
 
 handle_command({print_stat},_Sender,SD0=#state{partition=Partition, num_aborted=NumAborted,
-                    num_committed=NumCommitted, num_cert_fail=NumCertFail}) ->
+                    num_committed=NumCommitted, num_cert_fail=NumCertFail, total_time=A6, prepare_count=A7}) ->
     lager:info("~w: committed is ~w, aborted is ~w",[Partition, 
             NumCommitted, NumAborted, NumCertFail]),
-    {reply, {NumCommitted, NumAborted, NumCertFail}, SD0};
+    {reply, {NumCommitted, NumAborted, NumCertFail, A6, A7}, SD0};
     
 handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTxs}) ->
     PreparedList = ets:tab2list(PreparedTxs),
@@ -308,6 +313,8 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               committed_tx=CommittedTx,
                               if_certify=IfCertify,
                               quorum=Quorum,
+                              total_time=TotalTime,
+                              prepare_count=PrepareCount,
                               num_cert_fail=NumCertFail,
                               prepared_txs=PreparedTxs
                               }) ->
@@ -315,6 +322,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
     Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, 
                         PrepareTime, IfCertify),
+    UsedTime = now_microsec(erlang:now()) - PrepareTime,
     case Result of
         {ok, NewPrepare} ->
             case IfReplicate of
@@ -325,7 +333,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                     {noreply, State};
                 false ->
                     riak_core_vnode:reply(OriginalSender, {prepared, TxId, NewPrepare}),
-                    {noreply, State}
+                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}} 
             end;
         {error, wait_more} ->
             spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
@@ -334,7 +342,8 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, {abort, TxId}),
             %gen_fsm:send_event(OriginalSender, abort),
-            {noreply, State#state{num_cert_fail=NumCertFail+1}}
+            {noreply, State#state{num_cert_fail=NumCertFail+1, 
+                total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}}
     end;
 
 handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
