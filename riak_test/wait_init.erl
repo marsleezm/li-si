@@ -1,7 +1,7 @@
 -module(wait_init).
 
--export([wait_ready_nodes/1]).
+-export([check_ready/1]).
 
 
-wait_ready_nodes(_) ->
+check_ready(_) ->
     true.

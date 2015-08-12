@@ -497,7 +497,7 @@ prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
 
-            PrepareTime = tx_utilities:increment_tx(TxId#tx_id.snapshot_time),
+            PrepareTime = tx_utilities:increment_ts(TxId#tx_id.snapshot_time),
 		    set_prepared(PreparedTxs, TxWriteSet, TxId,PrepareTime),
 
 		    %LogRecord = #log_record{tx_id=TxId,
