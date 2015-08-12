@@ -212,7 +212,7 @@ receive_prepared({ok, {Type,Snapshot}},
              S0#state{read_set=ReadSet1, num_to_read = NumToRead-1}}
     end;
 
-receive_prepared(abort, S0) ->
+receive_prepared({abort, _}, S0) ->
     {next_state, abort, S0, 0};
 
 receive_prepared(timeout, S0) ->
@@ -246,7 +246,7 @@ single_committing({committed, CommitTime}, S0=#state{from=_From, num_to_read=Num
                         commit_time=CommitTime}}
     end;
     
-single_committing(abort, S0=#state{from=_From}) ->
+single_committing({abort, _}, S0=#state{from=_From}) ->
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc after receiving all prepare_times, send the commit message to all
@@ -274,7 +274,7 @@ abort(timeout, SD0=#state{tx_id = TxId,
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted});
 
-abort(abort, SD0=#state{tx_id = TxId,
+abort({abort, _}, SD0=#state{tx_id = TxId,
                         updated_partitions=UpdatedPartitions}) ->
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted});
