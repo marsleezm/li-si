@@ -1,4 +1,3 @@
-%%
 %% Copyright (c) 2014 SyncFree Consortium.  All Rights Reserved.
 %%
 %% This file is provided to you under the Apache License,
@@ -27,7 +26,7 @@
 	    async_read_data_item/4,
 	    get_cache_name/2,
         set_prepared/4,
-        async_send_msg/2,
+        async_send_msg/3,
         update_store/4,
 
         check_prepared/3,
@@ -277,8 +276,8 @@ handle_command({check_servers_ready},_Sender,SD0) ->
 handle_command({read, Key, Type, TxId}, Sender, SD0=#state{
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
     case clocksi_readitem:check_clock(Key, TxId, PreparedTxs) of
-        not_ready ->
-            spawn(clocksi_vnode, async_send_msg, [{async_read, Key, Type, TxId,
+        {not_ready, Delay} ->
+            spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
                          Sender}, {Partition, node()}]),
             %lager:info("Not ready for key ~w ~w, reader is ~w",[Key, TxId, Sender]),
             {noreply, SD0};
@@ -292,8 +291,8 @@ handle_command({async_read, Key, Type, TxId, OrgSender}, _Sender,SD0=#state{
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
     %lager:info("Got async read request for key ~w of tx ~w",[Key, TxId]),
     case clocksi_readitem:check_clock(Key, TxId, PreparedTxs) of
-        not_ready ->
-            spawn(clocksi_vnode, async_send_msg, [{async_read, Key, Type, TxId,
+        {not_ready, Delay} ->
+            spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
                          OrgSender}, {Partition, node()}]),
             %lager:info("Not ready for key ~w ~w",[Key, TxId]),
             {noreply, SD0};
@@ -334,7 +333,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                     {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}} 
             end;
         {error, wait_more} ->
-            spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
+            spawn(clocksi_vnode, async_send_msg, [2, {prepare, TxId, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, write_conflict} ->
@@ -384,7 +383,7 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                     {noreply, State}
             end;
         {error, wait_more}->
-            spawn(clocksi_vnode, async_send_msg, [{prepare, TxId, 
+            spawn(clocksi_vnode, async_send_msg, [2, {prepare, TxId, 
                         WriteSet, OriginalSender}, {Partition, node()}]),
             {noreply, State};
         {error, write_conflict} ->
@@ -491,9 +490,8 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
-async_send_msg(Msg, To) ->
-    SleepTime = random:uniform(150)+50,
-    timer:sleep(SleepTime),
+async_send_msg(Delay, Msg, To) ->
+    timer:sleep(Delay),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
 prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, PrepareTime, IfCertify)->
