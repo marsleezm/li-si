@@ -271,10 +271,8 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
             {reply, false, SD0}
     end;
 
-handle_command({check_servers_ready},_Sender,SD0=#state{partition=Partition}) ->
-    Node = node(),
-    Result = clocksi_readitem_fsm:check_partition_ready(Node,Partition,?READ_CONCURRENCY),
-    {reply, Result, SD0};
+handle_command({check_servers_ready},_Sender,SD0) ->
+    {reply, true, SD0};
 
 handle_command({read, Key, Type, TxId}, Sender, SD0=#state{
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
@@ -449,10 +447,7 @@ handle_command({get_active_txns}, _Sender,
     ActiveTxs = ets:lookup(Prepared, active),
     {reply, {ok, ActiveTxs}, State};
 
-handle_command({start_read_servers}, _Sender,
-               #state{partition=Partition} = State) ->
-    clocksi_readitem_fsm:stop_read_servers(Partition),
-    clocksi_readitem_fsm:start_read_servers(Partition),
+handle_command({start_read_servers}, _Sender, State) ->
     {reply, ok, State};
 
 handle_command(_Message, _Sender, State) ->
@@ -491,7 +486,6 @@ handle_exit(_Pid, _Reason, State) ->
 terminate(_Reason, #state{partition=Partition} = _State) ->
     ets:delete(get_cache_name(Partition,prepared)),
     ets:delete(get_cache_name(Partition,inmemory_store)),
-    clocksi_readitem_fsm:stop_read_servers(Partition),    
     ok.
 
 %%%===================================================================
