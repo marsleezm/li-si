@@ -27,7 +27,7 @@
 -endif.
 
 %% API
--export([check_clock/3, return/4]).
+-export([check_prepared/3, return/4]).
 
 
 %% Spawn
@@ -41,15 +41,6 @@
 %%      if local clock is behind, it sleeps the fms until the clock
 %%      catches up. CLOCK-SI: clock skew.
 %%
-check_clock(Key,TxId,PreparedCache) ->
-    T_TS = TxId#tx_id.snapshot_time,
-    Time = clocksi_vnode:now_microsec(erlang:now()),
-    case T_TS > Time of
-        true ->
-	        {not_ready, (T_TS-Time) div 1000};
-        false ->
-	        check_prepared(Key,TxId,PreparedCache)
-    end.
 
 check_prepared(Key,TxId,PreparedCache) ->
     SnapshotTime = TxId#tx_id.snapshot_time,

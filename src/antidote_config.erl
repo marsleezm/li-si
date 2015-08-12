@@ -24,10 +24,10 @@ load(File) ->
     load_config(TermsList).
 
 set(Key, Value) ->
-    ok = application:set_env(basho_bench, Key, Value).
+    ok = application:set_env(antidote, Key, Value).
 
 get(Key) ->
-    case application:get_env(basho_bench, Key) of
+    case application:get_env(antidote, Key) of
         {ok, Value} ->
             Value;
         undefined ->
@@ -35,7 +35,7 @@ get(Key) ->
     end.
 
 get(Key, Default) ->
-    case application:get_env(basho_bench, Key) of
+    case application:get_env(antidote, Key) of
         {ok, Value} ->
             Value;
         _ ->

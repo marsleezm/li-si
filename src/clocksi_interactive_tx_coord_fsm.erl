@@ -406,7 +406,8 @@ main_test_() ->
      ]}.
 
 % Setup and Cleanup
-setup()      -> {ok,Pid} = clocksi_interactive_tx_coord_fsm:start_link(self(), ignore), Pid. 
+setup()      ->  
+                {ok,Pid} = clocksi_interactive_tx_coord_fsm:start_link(self(), ignore), Pid. 
 cleanup(Pid) -> case process_info(Pid) of undefined -> io:format("Already cleaned");
                                            _ -> clocksi_interactive_tx_coord_fsm:stop(Pid) end.
 

@@ -21,21 +21,39 @@
 
 -include("antidote.hrl").
 
--export([create_transaction_record/1]).
+-ifdef(TEST).
+-define(GET_MAX_TS(APP, KEY), {ok, clocksi_vnode:now_microsec(now())}).
+-else.
+-define(GET_MAX_TS(APP, KEY), application:get_env(APP, KEY)).
+-endif.
+-export([create_transaction_record/1, get_ts/0, update_ts/1, increment_ts/1, get_snapshot_time/1]).
+
 
 -spec create_transaction_record(snapshot_time() | ignore) -> txid().
-create_transaction_record(ClientClock) ->
+create_transaction_record(_ClientClock) ->
     %% Seed the random because you pick a random read server, this is stored in the process state
     {A1,A2,A3} = now(),
     _ = random:seed(A1, A2, A3),
-    {ok, SnapshotTime} = case ClientClock of
-        ignore ->
-            get_snapshot_time();
-        _ ->
-            get_snapshot_time(ClientClock)
-    end,
-    TransactionId = #tx_id{snapshot_time=SnapshotTime, server_pid=self()},
+    TransactionId = #tx_id{snapshot_time=get_ts(), server_pid=self()},
     TransactionId.
+
+-spec get_ts() -> non_neg_integer().
+get_ts() ->
+    {ok, TS} = ?GET_MAX_TS(antidote, max_tx),
+    max(clocksi_vnode:now_microsec(now()), TS).
+
+-spec update_ts(non_neg_integer()) -> ok.
+update_ts(SnapshotTS) ->
+    {ok, TS} = ?GET_MAX_TS(antidote, max_tx),
+    MaxTS = max(SnapshotTS, TS),
+    application:set_env(antidote, max_tx, MaxTS).
+
+-spec increment_ts(non_neg_integer()) -> non_neg_integer().
+increment_ts(SnapshotTS) ->
+    {ok, TS} = ?GET_MAX_TS(antidote, max_tx),
+    MaxTS = max(SnapshotTS, TS),
+    application:set_env(antidote, max_tx, MaxTS+1),
+    MaxTS+1.
 
 %%@doc Set the transaction Snapshot Time to the maximum value of:
 %%     1.ClientClock, which is the last clock of the system the client
@@ -66,3 +84,5 @@ wait_for_clock(Clock) ->
                      wait_for_clock(Clock)
              end
     end.
+
+

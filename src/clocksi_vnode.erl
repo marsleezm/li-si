@@ -275,7 +275,8 @@ handle_command({check_servers_ready},_Sender,SD0) ->
 
 handle_command({read, Key, Type, TxId}, Sender, SD0=#state{
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
-    case clocksi_readitem:check_clock(Key, TxId, PreparedTxs) of
+    tx_utilities:update_ts(TxId#tx_id.snapshot_time),
+    case clocksi_readitem:check_prepared(Key, TxId, PreparedTxs) of
         {not_ready, Delay} ->
             spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
                          Sender}, {Partition, node()}]),
@@ -290,15 +291,14 @@ handle_command({read, Key, Type, TxId}, Sender, SD0=#state{
 handle_command({async_read, Key, Type, TxId, OrgSender}, _Sender,SD0=#state{
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
     %lager:info("Got async read request for key ~w of tx ~w",[Key, TxId]),
-    case clocksi_readitem:check_clock(Key, TxId, PreparedTxs) of
+    tx_utilities:update_ts(TxId#tx_id.snapshot_time),
+    case clocksi_readitem:check_prepared(Key, TxId, PreparedTxs) of
         {not_ready, Delay} ->
             spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
                          OrgSender}, {Partition, node()}]),
-            %lager:info("Not ready for key ~w ~w",[Key, TxId]),
             {noreply, SD0};
         ready ->
             Result = clocksi_readitem:return(Key, Type, TxId, InMemoryStore),
-            %lager:info("Ready!! ~w ~w, Result is ~w",[Key, TxId, Result]),
             riak_core_vnode:reply(OrgSender, Result),
             {noreply, SD0}
     end;
@@ -315,21 +315,19 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               num_cert_fail=NumCertFail,
                               prepared_txs=PreparedTxs
                               }) ->
-    PrepareTime = now_microsec(erlang:now()),
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, 
-                        PrepareTime, IfCertify),
-    UsedTime = now_microsec(erlang:now()) - PrepareTime,
+    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, IfCertify),
     case Result of
-        {ok, NewPrepare} ->
+        {ok, PrepareTime} ->
+            UsedTime = now_microsec(erlang:now()) - PrepareTime,
             case IfReplicate of
                 true ->
                     PendingRecord = {prepare, Quorum-1, OriginalSender, 
-                            {prepared, TxId, NewPrepare}, {TxId, WriteSet}},
+                            {prepared, TxId, PrepareTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State};
                 false ->
-                    riak_core_vnode:reply(OriginalSender, {prepared, TxId, NewPrepare}),
+                    riak_core_vnode:reply(OriginalSender, {prepared, TxId, PrepareTime}),
                     {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}} 
             end;
         {error, wait_more} ->
@@ -339,8 +337,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, {abort, TxId}),
             %gen_fsm:send_event(OriginalSender, abort),
-            {noreply, State#state{num_cert_fail=NumCertFail+1, 
-                total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}}
+            {noreply, State#state{num_cert_fail=NumCertFail+1, prepare_count=PrepareCount+1}}
     end;
 
 handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
@@ -353,18 +350,17 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                               num_cert_fail=NumCertFail,
                               num_committed=NumCommitted
                               }) ->
-    PrepareTime = now_microsec(erlang:now()),
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, PrepareTime, IfCertify), 
+    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, IfCertify), 
     case Result of
-        {ok, NewPrepare} ->
-            ResultCommit = commit(TxId, NewPrepare, WriteSet, CommittedTx, State),
+        {ok, PrepareTime} ->
+            ResultCommit = commit(TxId, PrepareTime, WriteSet, CommittedTx, State),
             case ResultCommit of
                 {ok, {committed, NewCommittedTx}} ->
                     case IfReplicate of
                         true ->
                             PendingRecord = {commit, Quorum-1, OriginalSender, 
-                                {committed, NewPrepare}, {TxId, WriteSet}},
+                                {committed, PrepareTime}, {TxId, WriteSet}},
                             %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                             %{noreply, State};
@@ -372,7 +368,7 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                                     num_committed=NumCommitted+1}};
                         false ->
                             %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
-                            riak_core_vnode:reply(OriginalSender, {committed, NewPrepare}),
+                            riak_core_vnode:reply(OriginalSender, {committed, PrepareTime}),
                             %{noreply, State}
                             {noreply, State#state{committed_tx=NewCommittedTx,
                                     num_committed=NumCommitted+1}}
@@ -492,14 +488,16 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 async_send_msg(Delay, Msg, To) ->
     timer:sleep(Delay),
+    lager:warning("Has to wait ~w..",[Delay]),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
-prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, PrepareTime, IfCertify)->
+prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
             %case TxWriteSet of 
             %    [{Key, Type, Op} | Rest] -> 
 
+            PrepareTime = tx_utilities:increment_tx(TxId#tx_id.snapshot_time),
 		    set_prepared(PreparedTxs, TxWriteSet, TxId,PrepareTime),
 
 		    %LogRecord = #log_record{tx_id=TxId,
@@ -668,38 +666,3 @@ update_store([{Key, Type, {Param, Actor}}|Rest], TxId, TxCommitTime, InMemorySto
     end,
     ok.
 
-%write_set_to_logrecord(TxId, WriteSet) ->
-%    lists:foldl(fun({Key,Type,Op}, Acc) ->
-%			Acc ++ [#log_record{tx_id=TxId, op_type=update,
-%					    op_payload={Key, Type, Op}}]
-%		end,[],WriteSet).
-
-%% Internal functions
-filter_updates_per_key(Updates, Key) ->
-    FilterMapFun = fun ({KeyPrime, _Type, Op}) ->
-        case KeyPrime == Key of
-            true  -> {true, Op};
-            false -> false
-        end
-    end,
-    lists:filtermap(FilterMapFun, Updates).
-
-
--ifdef(TEST).
-
-%% @doc Testing filter_updates_per_key.
-filter_updates_per_key_test()->
-    Op1 = {update, {{increment,1}, actor1}},
-    Op2 = {update, {{increment,2}, actor1}},
-    Op3 = {update, {{increment,3}, actor1}},
-    Op4 = {update, {{increment,4}, actor1}},
-
-    ClockSIOp1 = {a, crdt_pncounter, Op1},
-    ClockSIOp2 = {b, crdt_pncounter, Op2},
-    ClockSIOp3 = {c, crdt_pncounter, Op3},
-    ClockSIOp4 = {a, crdt_pncounter, Op4},
-
-    ?assertEqual([Op1, Op4], 
-        filter_updates_per_key([ClockSIOp1, ClockSIOp2, ClockSIOp3, ClockSIOp4], a)).
-
--endif.
