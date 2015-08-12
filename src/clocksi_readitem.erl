@@ -46,7 +46,7 @@ check_clock(Key,TxId,PreparedCache) ->
     Time = clocksi_vnode:now_microsec(erlang:now()),
     case T_TS > Time of
         true ->
-	        {not_ready, T_TS-Time};
+	        {not_ready, (T_TS-Time) div 1000};
         false ->
 	        check_prepared(Key,TxId,PreparedCache)
     end.
