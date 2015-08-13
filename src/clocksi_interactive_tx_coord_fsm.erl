@@ -310,10 +310,9 @@ committing(timeout, SD0=#state{tx_id = TxId,
     case dict:size(UpdatedPartitions) of
         0 ->
             reply_to_client(SD0#state{state=committed});
-        N ->
+        _N ->
             ?CLOCKSI_VNODE:commit(UpdatedPartitions, TxId, Commit_time),
-            {next_state, receive_committed,
-             SD0#state{num_to_ack=N, state=committing}}
+            reply_to_client(SD0#state{state=committed})
     end.
 
 %% @doc when an error occurs or an updated partition 
