@@ -44,9 +44,9 @@ confirm() ->
     lager:info("Vnodes are started up"),
 
     pass = start_stop_test(),
-    pass = get_empty_crdt_test(<<"key0">>),
-    pass = update_counter_crdt_test(<<"key1">>, 10),
-    pass = update_counter_crdt_and_read_test(<<"key2">>, 15),
+    pass = get_empty_crdt_test(0),
+    pass = update_counter_crdt_test(1, 10),
+    pass = update_counter_crdt_and_read_test(2, 15),
     pass = atomic_update_txn_test(),
     pass = snapshot_read_test(),
     pass = transaction_orset_test(),
