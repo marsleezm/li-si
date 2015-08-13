@@ -95,7 +95,7 @@ start_link(From, Clientclock, Operations) ->
     gen_fsm:start_link(?MODULE, [From, Clientclock, Operations], []).
 
 start_link(From, Operations) ->
-    gen_fsm:start_link(?MODULE, [From, ignore, Operations], []).
+    gen_fsm:start_link(?MODULE, [From, 0, Operations], []).
 
 stop(Pid) -> gen_fsm:sync_send_all_state_event(Pid,stop).
 
@@ -173,7 +173,7 @@ execute_batch_ops(timeout, SD=#state{
 %% @doc in this state, the fsm waits for prepare_time from each updated
 %%      partitions in order to compute the final tx timestamp (the maximum
 %%      of the received prepare_time).
-receive_prepared({prepared, ReceivedPrepareTime},
+receive_prepared({prepared, _, ReceivedPrepareTime},
                  S0=#state{num_to_ack=NumToAck,
                            num_to_read=NumToRead,
                            prepare_time=PrepareTime}) ->
@@ -354,7 +354,7 @@ main_test_() ->
      ]}.
 
 % Setup and Cleanup
-setup()      -> {ok,Pid} = clocksi_interactive_tx_coord_fsm:start_link(self(), ignore), Pid. 
+setup()      -> {ok,Pid} = clocksi_interactive_tx_coord_fsm:start_link(self(), 0), Pid. 
 cleanup(Pid) -> case process_info(Pid) of undefined -> io:format("Already cleaned");
                                            _ -> clocksi_interactive_tx_coord_fsm:stop(Pid) end.
 

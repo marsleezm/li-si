@@ -136,7 +136,6 @@ handle_cast({repl_ack, {Type, TxId}}, SD0=#state{replicated_log=ReplicatedLog,
                 RecordType ->
                     case AckNeeded of
                         1 -> %%Has got all neede ack, can log message already
-                            lager:info("Need no more ack ~w", [TxId]),
                             DurableLog = case ets:lookup(ReplicatedLog, Partition) of
                                             [] ->
                                                 [];
@@ -149,7 +148,6 @@ handle_cast({repl_ack, {Type, TxId}}, SD0=#state{replicated_log=ReplicatedLog,
                             {fsm, undefined, FSMSender} = Sender,
                             gen_fsm:send_event(FSMSender, MsgToReply);
                         _ -> %%Wait for more replies
-                            lager:info("Need ~w more ack ~w", [AckNeeded-1, TxId]),
                             ets:insert(ReplicatedLog, {TxId, {RecordType, AckNeeded-1,
                                     Sender, MsgToReply, Record}})
                     end;
