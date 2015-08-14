@@ -405,7 +405,7 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
             case IfReplicate of
                 true ->
                     PendingRecord = {commit, Quorum-1, Sender, 
-                        committed, {TxId, TxCommitTime, Updates}},
+                        false, {TxId, TxCommitTime, Updates}},
                     %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     %{noreply, State};

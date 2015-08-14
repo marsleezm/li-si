@@ -146,7 +146,12 @@ handle_cast({repl_ack, {Type, TxId}}, SD0=#state{replicated_log=ReplicatedLog,
                             ets:delete(ReplicatedLog, TxId),
                             %lager:info("#####DONE#####Sending ~p to ~p", [Sender, MsgToReply]),
                             {fsm, undefined, FSMSender} = Sender,
-                            gen_fsm:send_event(FSMSender, MsgToReply);
+                            case MsgToReply of
+                                false ->
+                                    ok;
+                                _ ->
+                                    gen_fsm:send_event(FSMSender, MsgToReply)
+                            end;
                         _ -> %%Wait for more replies
                             ets:insert(ReplicatedLog, {TxId, {RecordType, AckNeeded-1,
                                     Sender, MsgToReply, Record}})
