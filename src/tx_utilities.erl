@@ -64,7 +64,6 @@ update_ts(SnapshotTS) ->
 -spec increment_ts(non_neg_integer()) -> non_neg_integer().
 increment_ts(SnapshotTS) ->
     {ok, TS} = ?GET_MAX_TS(antidote, max_ts),
-    lager:info("TS is ~w, SnapshotTS is ~w", [TS, SnapshotTS]),
     MaxTS = max(SnapshotTS, TS),
     application:set_env(antidote, max_ts, MaxTS+1),
     MaxTS+1.
