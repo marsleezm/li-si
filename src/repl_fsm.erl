@@ -164,7 +164,7 @@ handle_cast({chain_replicate, Partition, Log, MsgToReply, RepNeeded},
     case RepNeeded of
         1 ->
             {{fsm, undefined, FSMSender}, Msg} = MsgToReply,
-            case MsgToReply of
+            case Msg of
                 false ->
                     ok;
                 _ ->
