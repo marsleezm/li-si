@@ -110,6 +110,7 @@ stop(Pid) -> gen_fsm:sync_send_all_state_event(Pid,stop).
 
 %% @doc Initialize the state.
 init([From, ClientClock, Operations]) ->
+    %lager:info("Initing"),
     random:seed(now()),
     SD = #state{
             causal_clock = ClientClock,
@@ -132,7 +133,8 @@ start_execute_txns(timeout, SD) ->
 execute_batch_ops(SD=#state{causal_clock=CausalClock,
                     operations=Operations
 		      }) ->
-    TxId = tx_utilities:create_transaction_record(CausalClock),
+    %lager:info("In execute batch"),
+    TxId = tx_utilities:create_transaction_record(CausalClock+1),
     [CurrentOps|_RestOps] = Operations, 
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer}) ->
                     case Operation of
@@ -146,7 +148,7 @@ execute_batch_ops(SD=#state{causal_clock=CausalClock,
                                                         {ok, {Type,SnapshotState}}
                                                     end,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
-                            %lager:info("New read set is ~w",[RSet]),
+                            %%lager:info("New read set is ~w",[RSet]),
                             {UpdatedParts, [Type:value(Snapshot)|RSet], Buffer1};
                         {update, Key, Type, Op} ->
                             Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
@@ -172,7 +174,7 @@ execute_batch_ops(SD=#state{causal_clock=CausalClock,
                     end
                 end,
     {WriteSet1, ReadSet1, _} = lists:foldl(ProcessOp, {dict:new(), [], dict:new()}, CurrentOps),
-    %lager:info("Operations are ~w, WriteSet is ~w, ReadSet is ~w",[CurrentOps, WriteSet1, ReadSet1]),
+    %%lager:info("Operations are ~w, WriteSet is ~w, ReadSet is ~w",[CurrentOps, WriteSet1, ReadSet1]),
     case dict:size(WriteSet1) of
         0->
             reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, 
@@ -195,12 +197,13 @@ execute_batch_ops(SD=#state{causal_clock=CausalClock,
 receive_prepared({prepared, TxId, ReceivedPrepareTime},
                  S0=#state{num_to_ack=NumToAck, tx_id=TxId,
                             prepare_time=PrepareTime}) ->
+    %lager:info("Got prepared of ~w", [TxId]),
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     case NumToAck of 
         1 ->
             send_commit(S0#state{prepare_time=MaxPrepareTime, commit_time=MaxPrepareTime, state=committing});
         _ ->
-            %lager:info("Txn ~w , Got reply ~w, NumtoAck ~w",[TxId, ReceivedPrepareTime, NumToAck]),
+            %%lager:info("Txn ~w , Got reply ~w, NumtoAck ~w",[TxId, ReceivedPrepareTime, NumToAck]),
             {next_state, receive_prepared,
              S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime}}
     end;
@@ -233,6 +236,7 @@ single_committing(_, S0=#state{from=_From}) ->
 send_commit(SD0=#state{tx_id = TxId,
                               updated_partitions=UpdatedPartitions,
                               commit_time=Commit_time}) ->
+    %lager:info("Trying to commit ~w",[TxId]),
     case dict:size(UpdatedPartitions) of
         0 ->
             reply_to_client(SD0#state{state=committed});
@@ -259,9 +263,11 @@ reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet
             case length(Operations) of 
                 1 ->
                     RRSet = lists:reverse(lists:flatten([ReadSet|FinalReadSet])),
+                    %lager:info("Replying to clinet"),
                     From ! {ok, {TxId, RRSet, CommitTime}},
                     {stop, normal, SD};
                 _ ->
+                    %lager:info("Continuing"),
                     [_ExecutedOps|RestOps] = Operations,
                     execute_batch_ops(SD#state{operations=RestOps,
                         final_read_set=[ReadSet|FinalReadSet], causal_clock=CommitTime})
