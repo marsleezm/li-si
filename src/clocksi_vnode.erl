@@ -75,7 +75,6 @@
                 committed_tx :: dict(),
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
-                quorum :: non_neg_integer(),
                 inmemory_store :: cache_id(),
                 %Statistics
                 total_time :: non_neg_integer(),
@@ -159,7 +158,6 @@ init([Partition]) ->
 
     IfCertify = antidote_config:get(do_cert),
     IfReplicate = antidote_config:get(do_repl),
-    Quorum = antidote_config:get(quorum),
 
     _ = case IfReplicate of
                     true ->
@@ -171,7 +169,6 @@ init([Partition]) ->
     {ok, #state{partition=Partition,
                 committed_tx=CommittedTx,
                 prepared_txs=PreparedTxs,
-                quorum = Quorum,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
                 inmemory_store=InMemoryStore,
@@ -309,7 +306,6 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               if_replicate=IfReplicate,
                               committed_tx=CommittedTx,
                               if_certify=IfCertify,
-                              quorum=Quorum,
                               total_time=TotalTime,
                               prepare_count=PrepareCount,
                               num_cert_fail=NumCertFail,
@@ -322,7 +318,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
             UsedTime = now_microsec(erlang:now()) - PrepareTime,
             case IfReplicate of
                 true ->
-                    PendingRecord = {prepare, Quorum-1, OriginalSender, 
+                    PendingRecord = {prepare, OriginalSender, 
                             {prepared, TxId, PrepareTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State};
@@ -344,7 +340,6 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
                               if_certify=IfCertify,
-                              quorum=Quorum,
                               committed_tx=CommittedTx,
                               prepared_txs=PreparedTxs,
                               num_cert_fail=NumCertFail,
@@ -359,7 +354,7 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                 {ok, {committed, NewCommittedTx}} ->
                     case IfReplicate of
                         true ->
-                            PendingRecord = {commit, Quorum-1, OriginalSender, 
+                            PendingRecord = {commit, OriginalSender, 
                                 {committed, PrepareTime}, {TxId, WriteSet}},
                             %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                             repl_fsm:replicate(Partition, {TxId, PendingRecord}),
@@ -393,7 +388,6 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
 %% eventually.
 handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
-                      quorum=Quorum,
                       committed_tx=CommittedTx,
                       if_replicate=IfReplicate,
                       num_committed=NumCommitted
@@ -404,7 +398,7 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
         {ok, {committed,NewCommittedTx}} ->
             case IfReplicate of
                 true ->
-                    PendingRecord = {commit, Quorum-1, Sender, 
+                    PendingRecord = {commit, Sender, 
                         false, {TxId, TxCommitTime, Updates}},
                     %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
