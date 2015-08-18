@@ -399,7 +399,7 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
             case IfReplicate of
                 true ->
                     PendingRecord = {commit, Sender, 
-                        false, {TxId, TxCommitTime, Updates}},
+                        committed, {TxId, TxCommitTime, Updates}},
                     %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     %{noreply, State};
@@ -482,7 +482,6 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 async_send_msg(Delay, Msg, To) ->
     timer:sleep(Delay),
-    lager:warning("Has to wait ~w..",[Delay]),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
 prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
