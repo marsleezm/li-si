@@ -42,13 +42,9 @@ create_transaction_record(ClientClock) ->
 get_and_update_ts(CausalTS) ->
     {ok, TS} = ?GET_MAX_TS(antidote, max_ts),
     Max = max(clocksi_vnode:now_microsec(now()), TS),
-    case CausalTS > Max of
-        true ->
-            application:set_env(antidote, max_ts, CausalTS),
-            CausalTS;
-        false ->
-            Max     
-    end. 
+    Max2 = max(Max, CausalTS) + 1,
+    application:set_env(antidote, max_ts, Max2),
+    Max2.
 
 -spec update_ts(non_neg_integer()) -> non_neg_integer().
 update_ts(SnapshotTS) ->

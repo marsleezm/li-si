@@ -134,7 +134,8 @@ execute_batch_ops(SD=#state{causal_clock=CausalClock,
                     operations=Operations
 		      }) ->
     %lager:info("In execute batch"),
-    TxId = tx_utilities:create_transaction_record(CausalClock+1),
+    TxId = tx_utilities:create_transaction_record(CausalClock),
+    %lager:info("My tx id is ~w", [TxId]),
     [CurrentOps|_RestOps] = Operations, 
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer}) ->
                     case Operation of
