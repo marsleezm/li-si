@@ -49,7 +49,7 @@ get_and_update_ts(CausalTS) ->
 -spec update_ts(non_neg_integer()) -> non_neg_integer().
 update_ts(SnapshotTS) ->
     {ok, TS} = ?GET_MAX_TS(antidote, max_ts),
-    case TS > SnapshotTS of
+    case TS >= SnapshotTS of
         true ->
             TS;
         _ ->
