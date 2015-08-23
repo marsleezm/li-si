@@ -313,6 +313,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               }) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
     Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, IfCertify),
+    timer:sleep(random:uniform(10)+10),
     case Result of
         {ok, PrepareTime} ->
             UsedTime = now_microsec(erlang:now()) - PrepareTime,
