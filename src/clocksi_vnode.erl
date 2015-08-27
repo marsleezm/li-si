@@ -176,6 +176,7 @@ init([Partition]) ->
                 total_time = 0, 
                 prepare_count = 0, 
                 num_aborted = 0,
+                num_blocked = 0,
                 num_cert_fail = 0,
                 num_committed = 0}}.
 
