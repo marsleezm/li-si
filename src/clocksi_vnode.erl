@@ -80,6 +80,7 @@
                 total_time :: non_neg_integer(),
                 prepare_count :: non_neg_integer(),
                 num_aborted :: non_neg_integer(),
+                num_blocked :: non_neg_integer(),
                 num_cert_fail :: non_neg_integer(),
                 num_committed :: non_neg_integer()}).
 
@@ -202,15 +203,15 @@ print_stat() ->
     PartitionList = chashbin:to_list(CHBin),
     print_stat(PartitionList, {0,0,0,0,0}).
 
-print_stat([], {CommitAcc, AbortAcc, CertFailAcc, TimeAcc, CntAcc}) ->
-    lager:info("Total number committed is ~w, total number aborted is ~w, cer fail is ~w, Avg time is ~w",
-                [CommitAcc, AbortAcc, CertFailAcc, TimeAcc div CntAcc]);
-print_stat([{Partition,Node}|Rest], {CommitAcc, AbortAcc, CertFailAcc, TimeAcc, CntAcc}) ->
-    {Commit, Abort, Cert, TimeA, CntA} = riak_core_vnode_master:sync_command({Partition,Node},
+print_stat([], {CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc, CntAcc}) ->
+    lager:info("Total number committed is ~w, total number aborted is ~w, cer fail is ~w, num blocked is ~w,Avg time is ~w",
+                [CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc div CntAcc]);
+print_stat([{Partition,Node}|Rest], {CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc, CntAcc}) ->
+    {Commit, Abort, Cert, BlockedA, TimeA, CntA} = riak_core_vnode_master:sync_command({Partition,Node},
 						 {print_stat},
 						 ?CLOCKSI_MASTER,
 						 infinity),
-	print_stat(Rest, {CommitAcc+Commit, AbortAcc+Abort, CertFailAcc+Cert, TimeAcc+TimeA, CntAcc+CntA}).
+	print_stat(Rest, {CommitAcc+Commit, AbortAcc+Abort, CertFailAcc+Cert, BlockedAcc+BlockedA, TimeAcc+TimeA, CntAcc+CntA}).
 
 check_prepared_empty() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
@@ -252,10 +253,10 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
     {reply, Result, SD0};
 
 handle_command({print_stat},_Sender,SD0=#state{partition=Partition, num_aborted=NumAborted,
-                    num_committed=NumCommitted, num_cert_fail=NumCertFail, total_time=A6, prepare_count=A7}) ->
+                    num_committed=NumCommitted, num_cert_fail=NumCertFail, num_blocked=NumBlocked, total_time=A6, prepare_count=A7}) ->
     lager:info("~w: committed is ~w, aborted is ~w",[Partition, 
             NumCommitted, NumAborted, NumCertFail]),
-    {reply, {NumCommitted, NumAborted, NumCertFail, A6, A7}, SD0};
+    {reply, {NumCommitted, NumAborted, NumCertFail, NumBlocked, A6, A7}, SD0};
     
 handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTxs}) ->
     PreparedList = ets:tab2list(PreparedTxs),
@@ -270,7 +271,7 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
 handle_command({check_servers_ready},_Sender,SD0) ->
     {reply, true, SD0};
 
-handle_command({read, Key, Type, TxId}, Sender, SD0=#state{
+handle_command({read, Key, Type, TxId}, Sender, SD0=#state{num_blocked=NumBlocked,
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
     tx_utilities:update_ts(TxId#tx_id.snapshot_time),
     case clocksi_readitem:check_prepared(Key, TxId, PreparedTxs) of
@@ -278,14 +279,14 @@ handle_command({read, Key, Type, TxId}, Sender, SD0=#state{
             spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
                          Sender}, {Partition, node()}]),
             %lager:info("Not ready for key ~w ~w, reader is ~w",[Key, TxId, Sender]),
-            {noreply, SD0};
+            {noreply, SD0#state{num_blocked=NumBlocked+1}};
         ready ->
             Result = clocksi_readitem:return(Key, Type, TxId, InMemoryStore),
             {reply, Result, SD0}
     end;
 
 
-handle_command({async_read, Key, Type, TxId, OrgSender}, _Sender,SD0=#state{
+handle_command({async_read, Key, Type, TxId, OrgSender}, _Sender,SD0=#state{num_blocked=NumBlocked,
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
     %lager:info("Got async read request for key ~w of tx ~w",[Key, TxId]),
     tx_utilities:update_ts(TxId#tx_id.snapshot_time),
@@ -293,7 +294,7 @@ handle_command({async_read, Key, Type, TxId, OrgSender}, _Sender,SD0=#state{
         {not_ready, Delay} ->
             spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
                          OrgSender}, {Partition, node()}]),
-            {noreply, SD0};
+            {noreply, SD0#state{num_blocked=NumBlocked+1}};
         ready ->
             Result = clocksi_readitem:return(Key, Type, TxId, InMemoryStore),
             riak_core_vnode:reply(OrgSender, Result),
