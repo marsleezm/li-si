@@ -202,7 +202,7 @@ check_table_ready([{Partition,Node}|Rest]) ->
 print_stat() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
     PartitionList = chashbin:to_list(CHBin),
-    print_stat(PartitionList, {0,0,0,0,0}).
+    print_stat(PartitionList, {0,0,0,0,0,0}).
 
 print_stat([], {CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc, CntAcc}) ->
     lager:info("Total number committed is ~w, total number aborted is ~w, cer fail is ~w, num blocked is ~w,Avg time is ~w",
