@@ -255,8 +255,8 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
 
 handle_command({print_stat},_Sender,SD0=#state{partition=Partition, num_aborted=NumAborted,
                     num_committed=NumCommitted, num_cert_fail=NumCertFail, num_blocked=NumBlocked, total_time=A6, prepare_count=A7}) ->
-    lager:info("~w: committed is ~w, aborted is ~w",[Partition, 
-            NumCommitted, NumAborted, NumCertFail]),
+    lager:info("~w: committed is ~w, aborted is ~w, num cert fail ~w, num blocked ~w",[Partition, 
+            NumCommitted, NumAborted, NumCertFail, NumBlocked]),
     {reply, {NumCommitted, NumAborted, NumCertFail, NumBlocked, A6, A7}, SD0};
     
 handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTxs}) ->
