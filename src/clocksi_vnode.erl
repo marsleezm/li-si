@@ -21,6 +21,8 @@
 -include("antidote.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-define(NUM_VERSION, 20).
+
 -export([start_vnode/1,
 	    read_data_item/4,
 	    async_read_data_item/4,
@@ -56,6 +58,7 @@
          encode_handoff_item/2,
          handle_coverage/4,
          handle_exit/3]).
+
 
 -ignore_xref([start_vnode/1]).
 
@@ -344,36 +347,28 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                               if_certify=IfCertify,
                               committed_tx=CommittedTx,
                               prepared_txs=PreparedTxs,
+                              inmemory_store=InMemoryStore,
                               num_cert_fail=NumCertFail,
                               num_committed=NumCommitted
                               }) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, IfCertify), 
+    Result = prepare_and_commit(TxId, WriteSet, CommittedTx, PreparedTxs, InMemoryStore, IfCertify), 
     case Result of
-        {ok, PrepareTime} ->
-            ResultCommit = commit(TxId, PrepareTime, WriteSet, CommittedTx, State),
-            case ResultCommit of
-                {ok, {committed, NewCommittedTx}} ->
-                    case IfReplicate of
-                        true ->
-                            PendingRecord = {commit, OriginalSender, 
-                                {committed, PrepareTime}, {TxId, WriteSet}},
-                            %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
-                            repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                            %{noreply, State};
-                            {noreply, State#state{committed_tx=NewCommittedTx, 
-                                    num_committed=NumCommitted+1}};
-                        false ->
-                            %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
-                            riak_core_vnode:reply(OriginalSender, {committed, PrepareTime}),
-                            %{noreply, State}
-                            {noreply, State#state{committed_tx=NewCommittedTx,
-                                    num_committed=NumCommitted+1}}
-                        end;
-                {error, no_updates} ->
-                    %gen_fsm:send_event(OriginalSender, no_tx_record),
-                    riak_core_vnode:reply(OriginalSender, no_tx_record),
-                    {noreply, State}
+        {ok, {committed, CommitTime, NewCommittedTx}} ->
+            case IfReplicate of
+                true ->
+                    PendingRecord = {commit, OriginalSender, 
+                        {committed, CommitTime}, {TxId, WriteSet}},
+                    %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
+                    repl_fsm:replicate(Partition, {TxId, PendingRecord}),
+                    {noreply, State#state{committed_tx=NewCommittedTx, 
+                            num_committed=NumCommitted+1}};
+                false ->
+                    %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
+                    riak_core_vnode:reply(OriginalSender, {committed, CommitTime}),
+                    %{noreply, State}
+                    {noreply, State#state{committed_tx=NewCommittedTx,
+                            num_committed=NumCommitted+1}}
             end;
         {error, wait_more}->
             spawn(clocksi_vnode, async_send_msg, [2, {prepare, TxId, 
@@ -392,10 +387,12 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
                       committed_tx=CommittedTx,
                       if_replicate=IfReplicate,
+                      prepared_txs=PreparedTxs,
+                      inmemory_store=InMemoryStore,
                       num_committed=NumCommitted
                       } = State) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = commit(TxId, TxCommitTime, Updates, CommittedTx, State),
+    Result = commit(TxId, TxCommitTime, Updates, CommittedTx, PreparedTxs, InMemoryStore),
     case Result of
         {ok, {committed,NewCommittedTx}} ->
             case IfReplicate of
@@ -404,7 +401,6 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                         false, {TxId, TxCommitTime, Updates}},
                     %ets:insert(PreparedTxs, {committed_tx, NewCommittedTx}),
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    %{noreply, State};
                     {noreply, State#state{committed_tx=NewCommittedTx,
                             num_committed=NumCommitted+1}};
                 false ->
@@ -422,12 +418,12 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
     end;
 
 handle_command({abort, TxId, Updates}, _Sender,
-               #state{partition=_Partition, num_aborted=NumAborted} = State) ->
+               #state{partition=_Partition, prepared_txs=PreparedTxs, num_aborted=NumAborted} = State) ->
     case Updates of
         [] ->
             {reply, {error, no_tx_record}, State};
         _ -> 
-            clean_and_notify(TxId, Updates, State),
+            clean_prepared(PreparedTxs,Updates,TxId),
             {noreply, State#state{num_aborted=NumAborted+1}}
             %%{reply, ack_abort, State};
     end;
@@ -489,20 +485,28 @@ async_send_msg(Delay, Msg, To) ->
 prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            %case TxWriteSet of 
-            %    [{Key, Type, Op} | Rest] -> 
-
             PrepareTime = tx_utilities:increment_ts(TxId#tx_id.snapshot_time),
 		    set_prepared(PreparedTxs, TxWriteSet, TxId,PrepareTime),
-
-		    %LogRecord = #log_record{tx_id=TxId,
-			%		    op_type=prepare,
-			%		    op_payload=NewPrepare},
-            %        LogId = log_utilities:get_logid_from_key(Key),
-            %        [Node] = log_utilities:get_preflist_from_key(Key),
-		    %        NewUpdates = write_set_to_logrecord(TxId,TxWriteSet),
-            %        Result = logging_vnode:append_group(Node,LogId,NewUpdates ++ [LogRecord]),
 		    {ok, PrepareTime};
+	    false ->
+	        {error, write_conflict};
+        wait ->
+            {error,  wait_more}
+    end.
+
+prepare_and_commit(TxId, TxWriteSet, CommittedTx, PreparedTxs, InMemoryStore, IfCertify)->
+    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
+        true ->
+            CommitTime = tx_utilities:increment_ts(TxId#tx_id.snapshot_time),
+            case TxWriteSet of
+                  [{Key, _Type, _Value} | _Rest] ->
+                      update_store(TxWriteSet, TxId, CommitTime, InMemoryStore),
+                      NewDict = dict:store(Key, CommitTime, CommittedTx),
+                      clean_prepared(PreparedTxs, TxWriteSet, TxId),
+                      {ok, {committed, CommitTime, NewDict}};
+                  _ ->
+                      {error, no_updates}
+            end;
 	    false ->
 	        {error, write_conflict};
         wait ->
@@ -517,12 +521,12 @@ set_prepared(PreparedTxs,[{Key, _Type, _Op} | Rest],TxId,Time) ->
     set_prepared(PreparedTxs,Rest,TxId,Time).
 
 commit(TxId, TxCommitTime, Updates, CommittedTx, 
-                                State=#state{inmemory_store=InMemoryStore})->
+                                PreparedTxs, InMemoryStore)->
     case Updates of
         [{Key, _Type, _Value} | _Rest] -> 
             update_store(Updates, TxId, TxCommitTime, InMemoryStore),
             NewDict = dict:store(Key, TxCommitTime, CommittedTx),
-            clean_and_notify(TxId,Updates,State),
+            clean_prepared(PreparedTxs,Updates,TxId),
             {ok, {committed, NewDict}};
         _ -> 
             {error, no_updates}
@@ -540,11 +544,6 @@ commit(TxId, TxCommitTime, Updates, CommittedTx,
 %%      a. ActiteTxsPerKey,
 %%      b. PreparedTxs
 %%
-clean_and_notify(TxId, Updates, #state{
-			      prepared_txs=PreparedTxs}) ->
-    clean_prepared(PreparedTxs,Updates,TxId).
-
-
 clean_prepared(_PreparedTxs,[],_TxId) ->
     ok;
 clean_prepared(PreparedTxs,[{Key, _Type, _Op} | Rest],TxId) ->
@@ -647,17 +646,14 @@ update_store([{Key, Type, {Param, Actor}}|Rest], TxId, TxCommitTime, InMemorySto
      %       lager:info("Wrote ~w to key ~w",[Value, Key]),
             Init = Type:new(),
             {ok, NewSnapshot} = Type:update(Param, Actor, Init),
-            %lager:info("Updateing store for key ~w, value ~w firstly", [Key, Type:value(NewSnapshot)]),
-            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]}), 
-            update_store(Rest, TxId, TxCommitTime, InMemoryStore);
+            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]});
         [{Key, ValueList}] ->
       %      lager:info("Wrote ~w to key ~w with ~w",[Value, Key, ValueList]),
-            {RemainList, _} = lists:split(min(20,length(ValueList)), ValueList),
+            {RemainList, _} = lists:split(min(?NUM_VERSION,length(ValueList)), ValueList),
             [{_CommitTime, First}|_] = RemainList,
             {ok, NewSnapshot} = Type:update(Param, Actor, First),
-            %lager:info("Updateing store for key ~w, value ~w", [Key, Type:value(NewSnapshot)]),
-            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]}),
-            update_store(Rest, TxId, TxCommitTime, InMemoryStore)
+            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]})
     end,
+    update_store(Rest, TxId, TxCommitTime, InMemoryStore),
     ok.
 
