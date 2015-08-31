@@ -90,7 +90,6 @@ retrieve_log(Partition, LogName) ->
 
 
 init([Partition]) ->
-    %lager:info("Started! Partition is ~w, my name is ~w", [Partition, get_replfsm_name(Partition)]),
     ReplFactor = antidote_config:get(repl_factor),
     Quorum = antidote_config:get(quorum),
     LogSize = antidote_config:get(log_size),
@@ -230,7 +229,9 @@ handle_sync_event(_Event, _From, _StateName, StateData) ->
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
-terminate(_Reason, _SD) ->
+terminate(_Reason, #state{replicated_log=ReplicatedLog, pend_log=PendLog}) ->
+    ets:delete(ReplicatedLog),
+    ets:delete(PendLog),
     ok.
 
 %open_local_tables([], Dict) ->
