@@ -276,7 +276,7 @@ handle_command({check_servers_ready},_Sender,SD0) ->
 
 handle_command({read, Key, Type, TxId}, Sender, SD0=#state{num_blocked=NumBlocked,
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
-    tx_utilities:update_ts(TxId#tx_id.snapshot_time),
+    clock_service:update_ts(TxId#tx_id.snapshot_time),
     case clocksi_readitem:check_prepared(Key, TxId, PreparedTxs) of
         {not_ready, Delay} ->
             spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
@@ -291,7 +291,7 @@ handle_command({read, Key, Type, TxId}, Sender, SD0=#state{num_blocked=NumBlocke
 
 handle_command({async_read, Key, Type, TxId, OrgSender, LastTime}, _Sender,SD0=#state{num_blocked=NumBlocked, blocked_time=BlockedTime, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
     %lager:info("Got async read request for key ~w of tx ~w",[Key, TxId]),
-    tx_utilities:update_ts(TxId#tx_id.snapshot_time),
+    clock_service:update_ts(TxId#tx_id.snapshot_time),
     case clocksi_readitem:check_prepared(Key, TxId, PreparedTxs) of
         {not_ready, Delay} ->
             spawn(clocksi_vnode, async_send_msg, [Delay, {async_read, Key, Type, TxId,
@@ -482,7 +482,7 @@ async_send_msg(Delay, Msg, To) ->
 prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            PrepareTime = tx_utilities:increment_ts(TxId#tx_id.snapshot_time),
+            PrepareTime = clock_service:increment_ts(TxId#tx_id.snapshot_time),
 		    set_prepared(PreparedTxs, TxWriteSet, TxId,PrepareTime),
 		    {ok, PrepareTime};
 	    false ->
@@ -494,7 +494,7 @@ prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
 prepare_and_commit(TxId, TxWriteSet, CommittedTx, PreparedTxs, InMemoryStore, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            CommitTime = tx_utilities:increment_ts(TxId#tx_id.snapshot_time),
+            CommitTime = clock_service:increment_ts(TxId#tx_id.snapshot_time),
             case TxWriteSet of
                   [{Key, _Type, _Value} | _Rest] ->
                       update_store(TxWriteSet, TxId, CommitTime, InMemoryStore),
@@ -613,23 +613,6 @@ check_prepared(TxId, PreparedTxs, Key) ->
                     %end
             end
     end.
-
-%% check_keylog(_, [], _) ->
-%%     false;
-%% check_keylog(TxId, [H|T], CommittedTx)->
-%%     {_Key, _Type, ThisTxId}=H,
-%%     case ThisTxId > TxId of
-%%         true ->
-%%             CommitInfo = ets:lookup(CommittedTx, ThisTxId),
-%%             case CommitInfo of
-%%                 [{_, _CommitTime}] ->
-%%                     true;
-%%                 [] ->
-%%                     check_keylog(TxId, T, CommittedTx)
-%%             end;
-%%         false ->
-%%             check_keylog(TxId, T, CommittedTx)
-%%     end.
 
 -spec update_store(KeyValues :: [{key(), atom(), term()}],
                           TxId::txid(),TxCommitTime:: {term(), term()},
