@@ -279,7 +279,7 @@ abort({abort, _}, SD0=#state{tx_id = TxId,
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted});
 
-abort({prepared, _}, SD0=#state{tx_id=TxId,
+abort({prepared, _, _}, SD0=#state{tx_id=TxId,
                         updated_partitions=UpdatedPartitions}) ->
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted});
@@ -328,97 +328,3 @@ code_change(_OldVsn, StateName, State, _Extra) -> {ok, StateName, State}.
 
 terminate(_Reason, _SN, _SD) ->
     ok.
-
-
--ifdef(TEST).
-
-main_test_() ->
-    {foreach,
-     fun setup/0,
-     fun cleanup/1,
-     [
-      fun empty_prepare_test/1,
-      fun timeout_test/1,
-
-      fun update_single_abort_test/1,
-      fun update_single_success_test/1,
-      fun update_multi_abort_test1/1,
-      fun update_multi_abort_test2/1,
-      fun update_multi_success_test/1,
-
-      fun read_single_fail_test/1,
-      fun read_success_test/1
-
-%      fun get_snapshot_time_test/0,
-%      fun wait_for_clock_test/0
-     ]}.
-
-% Setup and Cleanup
-setup()      -> {ok,Pid} = clocksi_interactive_tx_coord_fsm:start_link(self(), 0), Pid. 
-cleanup(Pid) -> case process_info(Pid) of undefined -> io:format("Already cleaned");
-                                           _ -> clocksi_interactive_tx_coord_fsm:stop(Pid) end.
-
-empty_prepare_test(Pid) ->
-    fun() ->
-            ?assertMatch({ok, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-timeout_test(Pid) ->
-    fun() ->
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {timeout, riak_dt_pncounter, 
-                    {increment, nothing}}}, infinity)),
-            ?assertMatch({aborted, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-update_single_abort_test(Pid) ->
-    fun() ->
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {fail, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertMatch({aborted, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-update_single_success_test(Pid) ->
-    fun() ->
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {success, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertMatch({ok, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-update_multi_abort_test1(Pid) ->
-    fun() ->
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {success, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {success, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {fail, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertMatch({aborted, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-update_multi_abort_test2(Pid) ->
-    fun() ->
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {success, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {fail, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {fail, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertMatch({aborted, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-update_multi_success_test(Pid) ->
-    fun() ->
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {success, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertEqual(ok, gen_fsm:sync_send_event(Pid, {update, {success, riak_dt_pncounter, {increment, no}}}, infinity)),
-            ?assertMatch({ok, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-read_single_fail_test(Pid) ->
-    fun() ->
-            ?assertEqual({error, mock_read_fail}, 
-                    gen_fsm:sync_send_event(Pid, {read, {read_fail, riak_dt_pncounter}}, infinity))
-    end.
-
-read_success_test(Pid) ->
-    fun() ->
-            ?assertEqual({ok, 2}, 
-                    gen_fsm:sync_send_event(Pid, {read, {counter, riak_dt_gcounter}}, infinity)),
-            ?assertEqual({ok, [a]}, 
-                    gen_fsm:sync_send_event(Pid, {read, {set, riak_dt_gset}}, infinity)),
-            ?assertMatch({ok, _}, gen_fsm:sync_send_event(Pid, {prepare, empty}, infinity))
-    end.
-
-
--endif.

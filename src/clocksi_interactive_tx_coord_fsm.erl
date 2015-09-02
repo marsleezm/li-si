@@ -135,7 +135,7 @@ perform_singleitem_read(Key,Type) ->
 	    {error, unknown};
 	{error, Reason} ->
 	    {error, Reason};
-	{ok, {Type, Snapshot}} ->
+	{ok, Snapshot} ->
 	    ReadResult = Type:value(Snapshot),
 	    {ok, ReadResult}
     end.
@@ -153,7 +153,6 @@ execute_op({Op_type, Args}, Sender,
         prepare ->
             case Args of
             two_phase ->
-                %lager:info("Received prepare.. Two-phase prepare"),
                 {next_state, prepare_2pc, SD0#state{from=Sender, commit_protocol=Args}, 0};
             _ ->
                 %lager:info("Received prepare.. Normal prepare"),
@@ -252,11 +251,10 @@ prepare_2pc(timeout, SD0=#state{
 %% @doc in this state, the fsm waits for prepare_time from each updated
 %%      partitions in order to compute the final tx timestamp (the maximum
 %%      of the received prepare_time).
-receive_prepared({prepared, ReceivedPrepareTime},
+receive_prepared({prepared, _, ReceivedPrepareTime},
                  S0=#state{num_to_ack=NumToAck,
                            commit_protocol=CommitProtocol,
                            from=From, prepare_time=PrepareTime}) ->
-    io:format("Received prepared"),
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     case NumToAck of 1 ->
             case CommitProtocol of
@@ -273,7 +271,7 @@ receive_prepared({prepared, ReceivedPrepareTime},
              S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime}}
     end;
 
-receive_prepared(abort, S0) ->
+receive_prepared({abort, _}, S0) ->
     {next_state, abort, S0, 0};
 
 receive_prepared(timeout, S0) ->
@@ -295,7 +293,7 @@ committing_2pc(commit, Sender, SD0=#state{tx_id = TxId,
     case dict:size(UpdatedPartitions) of
         0 ->
             reply_to_client(SD0#state{state=committed, from=Sender});
-        _ ->
+        _N ->
             ?CLOCKSI_VNODE:commit(UpdatedPartitions, TxId, Commit_time),
             reply_to_client(SD0#state{state=committed, from=Sender})
     end.
@@ -310,7 +308,7 @@ committing(timeout, SD0=#state{tx_id = TxId,
     case dict:size(UpdatedPartitions) of
         0 ->
             reply_to_client(SD0#state{state=committed});
-        _N ->
+        _ ->
             ?CLOCKSI_VNODE:commit(UpdatedPartitions, TxId, Commit_time),
             reply_to_client(SD0#state{state=committed})
     end.
@@ -322,12 +320,12 @@ abort(timeout, SD0=#state{tx_id = TxId,
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted});
 
-abort(abort, SD0=#state{tx_id = TxId,
+abort({abort, _}, SD0=#state{tx_id = TxId,
                         updated_partitions=UpdatedPartitions}) ->
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted});
 
-abort({prepared, _}, SD0=#state{tx_id=TxId,
+abort({prepared, _, _}, SD0=#state{tx_id=TxId,
                         updated_partitions=UpdatedPartitions}) ->
     ?CLOCKSI_VNODE:abort(UpdatedPartitions, TxId),
     reply_to_client(SD0#state{state=aborted}).

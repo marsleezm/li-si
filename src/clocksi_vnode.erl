@@ -115,7 +115,7 @@ prepare(ListofNodes, TxId) ->
     dict:fold(fun(Node,WriteSet,_Acc) ->
 			riak_core_vnode_master:command(Node,
 						       {prepare, TxId,WriteSet, Self},
-                                Self,
+                               Self,
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
 
@@ -233,7 +233,7 @@ check_prepared_empty([{Partition,Node}|Rest]) ->
 	    true ->
             ok;
 	    false ->
-            lager:info("Prepared not empty!")
+            lager:warning("Prepared not empty!")
     end,
 	check_prepared_empty(Rest).
 

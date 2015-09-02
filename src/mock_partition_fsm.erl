@@ -162,9 +162,9 @@ execute_op({async_read_data_item, Key, From}, State) ->
 
 execute_op({prepare,From, [{Key, _, _}]}, State) ->
     Result = case Key of 
-                success -> {prepared, 10};
+                success -> {prepared, whatever, 10};
                 timeout -> timeout;
-                _ -> abort
+                _ -> {abort, whatever}
             end,
     gen_fsm:send_event(From, Result),
     {next_state, execute_op, State#state{key=Key}};
