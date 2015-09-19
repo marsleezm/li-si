@@ -56,28 +56,18 @@ stop_rep() ->
 %% ===================================================================
 
 init(_Args) ->
-    ClockSIMaster = { clocksi_vnode_master,
-                      {riak_core_vnode_master, start_link, [clocksi_vnode]},
+    PartitionMaster = { partition_vnode_master,
+                      {riak_core_vnode_master, start_link, [partition_vnode]},
                       permanent, 5000, worker, [riak_core_vnode_master]},
 
-    ClockSIsTxCoordSup =  { clocksi_static_tx_coord_sup,
-                           {clocksi_static_tx_coord_sup, start_link, []},
-                           permanent, 5000, supervisor, [clockSI_static_tx_coord_sup]},
-
-    ClockSIgTxCoordSup =  { clocksi_general_tx_coord_sup,
-                           {clocksi_general_tx_coord_sup, start_link, []},
-                           permanent, 5000, supervisor, [clockSI_general_tx_coord_sup]},
-
-    ClockSIiTxCoordSup =  { clocksi_interactive_tx_coord_sup,
-                            {clocksi_interactive_tx_coord_sup, start_link, []},
-                            permanent, 5000, supervisor,
-                            [clockSI_interactive_tx_coord_sup]},
+    GeneralTxCoordSup =  { general_tx_coord_sup,
+                           {general_tx_coord_sup, start_link, []},
+                           permanent, 5000, supervisor, [general_tx_coord_sup]},
     
     ReplFsmSup = {repl_fsm_sup,
     		      {repl_fsm_sup, start_link, []},
     		      permanent, 5000, supervisor,
     		      [repl_fsm_sup]},
-
 
     ClockService = {clock_service,
                  {clock_service,  start_link,
@@ -88,9 +78,7 @@ init(_Args) ->
 
     {ok,
      {{one_for_one, 5, 10},
-      [ClockSIMaster,
-       ClockSIsTxCoordSup,
-       ClockSIiTxCoordSup,
-       ClockSIgTxCoordSup,
+      [PartitionMaster,
+       GeneralTxCoordSup,
        ReplFsmSup,
        ClockService]}}.

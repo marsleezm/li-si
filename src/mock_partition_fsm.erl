@@ -19,7 +19,7 @@
 %% -------------------------------------------------------------------
 %% @doc A mocked file that emulates the behavior of several antidote 
 %%      components which relies on riak-core backend, e.g. 
-%%      clocksi_vnode, dc_utilities and log_utilities. For simplicity,
+%%      partition_vnode, dc_utilities and log_utilities. For simplicity,
 %%      the reply of some functions depend on the key being updated.
 %%      The detailed usage can be checked within each function, which is
 %%      self-explanatory.
@@ -144,7 +144,7 @@ prepare(UpdatedPartitions, _Transaction) ->
 
 %% We spawn a new mock_partition_fsm for each update request, therefore
 %% a mock fsm will only receive a single update so only need to store a 
-%% single updated key. In contrast, clocksi_vnode may receive multiple
+%% single updated key. In contrast, partition_vnode may receive multiple
 %% update request for a single transaction.
 execute_op({update_data_item, Key}, _From, State) ->
     Result = case Key of 

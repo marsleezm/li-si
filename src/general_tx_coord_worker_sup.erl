@@ -18,7 +18,7 @@
 %%
 %% -------------------------------------------------------------------
 
--module(clocksi_interactive_tx_coord_worker_sup).
+-module(general_tx_coord_worker_sup).
 -author("Christopher Meiklejohn <christopher.meiklejohn@gmail.com>").
 
 -behavior(supervisor).
@@ -33,6 +33,6 @@ start_link(Name) ->
 %% @doc Starts the coordinator of a ClockSI static transaction.
 init([]) ->
     Worker = {undefined,
-              {clocksi_interactive_tx_coord_fsm, start_link, []},
-               temporary, 5000, worker, [clocksi_interactive_tx_coord_fsm]},
+              {general_tx_coord_fsm, start_link, []},
+               temporary, 5000, worker, [general_tx_coord_fsm]},
     {ok, {{simple_one_for_one, 5, 10}, [Worker]}}.

@@ -18,7 +18,7 @@
 %%
 %% -------------------------------------------------------------------
 
--module(clocksi_interactive_tx_coord_sup).
+-module(general_tx_coord_sup).
 -author("Christopher Meiklejohn <christopher.meiklejohn@gmail.com>").
 
 -behavior(supervisor).
@@ -45,10 +45,10 @@ generate_module_name(N) ->
 generate_supervisor_spec(N) ->
     Module = generate_module_name(N),
     {Module,
-     {clocksi_interactive_tx_coord_worker_sup, start_link, [Module]},
-      permanent, 5000, worker, [clocksi_interactive_tx_coord_worker_sup]}.
+     {general_tx_coord_worker_sup, start_link, [Module]},
+      permanent, 5000, worker, [general_tx_coord_worker_sup]}.
 
-%% @doc Starts the coordinator of a ClockSI interactive transaction.
+%% @doc Starts the coordinator of a ClockSI general transaction.
 init([]) ->
     Pool = [generate_supervisor_spec(N) || N <- lists:seq(1, ?NUM_SUP)],
     {ok, {{one_for_one, 5, 10}, Pool}}.

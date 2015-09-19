@@ -22,7 +22,7 @@
 -include("antidote.hrl").
 
 -ifdef(TEST).
--define(GET_AND_UPDATE_TS(Clock), clocksi_vnode:now_microsec(now())).
+-define(GET_AND_UPDATE_TS(Clock), clock_service:now_microsec()).
 -else.
 -define(GET_AND_UPDATE_TS(Clock), clock_service:get_and_update_ts(Clock)).
 -endif.
