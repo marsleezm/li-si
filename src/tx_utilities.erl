@@ -22,12 +22,12 @@
 -include("antidote.hrl").
 
 -ifdef(TEST).
--define(GET_AND_UPDATE_TS(Clock), clock_service:now_microsec()).
+-define(GET_AND_UPDATE_TS(Clock), partition_vnode:now_microsec()).
 -else.
--define(GET_AND_UPDATE_TS(Clock), clock_service:get_and_update_ts(Clock)).
+-define(GET_AND_UPDATE_TS(Clock), tx_utilities:get_and_update_ts(Clock)).
 -endif.
 
--export([create_transaction_record/1]).
+-export([create_transaction_record/1, get_and_update_ts/1]).
 
 -spec create_transaction_record(snapshot_time() | ignore) -> txid().
 create_transaction_record(ClientClock) ->
@@ -35,6 +35,18 @@ create_transaction_record(ClientClock) ->
     {A1,A2,A3} = now(),
     _A = ClientClock,
     _ = random:seed(A1, A2, A3),
-    TransactionId = #tx_id{snapshot_time=?GET_AND_UPDATE_TS(ClientClock), server_pid=self()},
-    TransactionId.
-
+    #tx_id{snapshot_time=?GET_AND_UPDATE_TS(ClientClock), server_pid=self()}.
+    %lager:info("TxId is ~w",[TransactionId#tx_id.snapshot_time]),
+    %TransactionId.
+    
+get_and_update_ts(ClientClock) ->
+    LocalNode = case ets:lookup(meta_info, local_nodes) of
+                    [] ->
+                        L = hash_fun:get_local_nodes(),
+                        true = ets:insert(meta_info, {local_nodes, L}),
+                        lists:nth(random:uniform(length(L)),L);
+                    [{local_nodes, L}] ->
+                        lists:nth(random:uniform(length(L)),L)
+                end,
+    %lager:info("LocalNode is ~w", [LocalNode]),
+    partition_vnode:get_and_update_ts(LocalNode, ClientClock).

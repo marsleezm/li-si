@@ -32,11 +32,11 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -define(DC_UTIL, mock_partition_fsm).
--define(LOG_UTIL, mock_partition_fsm).
+-define(HASH_FUN, mock_partition_fsm).
 -define(PARTITION_VNODE, mock_partition_fsm).
 -else.
 -define(DC_UTIL, dc_utilities).
--define(LOG_UTIL, log_utilities).
+-define(HASH_FUN, hash_fun).
 -define(PARTITION_VNODE, partition_vnode).
 -endif.
 
@@ -103,7 +103,7 @@ stop(Pid) -> gen_fsm:sync_send_all_state_event(Pid,stop).
 -spec perform_singleitem_read(key()) -> {ok,val()} | {error,reason()}.
 perform_singleitem_read(Key) ->
     TxId = tx_utilities:create_transaction_record(0),
-    Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
+    Preflist = ?HASH_FUN:get_preflist_from_key(Key),
     IndexNode = hd(Preflist),
     case ?PARTITION_VNODE:read_data_item(IndexNode, Key, TxId) of
     error ->
@@ -140,7 +140,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                         {read, Key} ->
                             {ok, Snapshot} = case dict:find(Key, Buffer) of
                                                     error ->
-                                                        Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
+                                                        Preflist = ?HASH_FUN:get_preflist_from_key(Key),
                                                         IndexNode = hd(Preflist),
                                                         ?PARTITION_VNODE:read_data_item(IndexNode, Key, TxId);
                                                     {ok, SnapshotState} ->
@@ -149,7 +149,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
                             {UpdatedParts, [Snapshot|RSet], Buffer1};
                         {update, Key, Op, Param} ->
-                            Preflist = ?LOG_UTIL:get_preflist_from_key(Key),
+                            Preflist = ?HASH_FUN:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
                             UpdatedParts1 = case dict:is_key(IndexNode, UpdatedParts) of
                                                 false ->
@@ -172,7 +172,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
     case dict:size(WriteSet1) of
         0->
             reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, 
-                prepare_time=clock_service:now_microsec()});
+                prepare_time=partition_vnode:now_microsec()});
         1->
             UpdatedPart = dict:to_list(WriteSet1),
             ?PARTITION_VNODE:single_commit(UpdatedPart, TxId),

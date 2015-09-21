@@ -31,6 +31,10 @@
         async_send_msg/3,
         update_store/4,
 
+        get_and_update_ts/2,
+        update_ts/2,
+        increment_ts/2,
+
         check_prepared/3,
         certification_check/5,
         prepare/2,
@@ -43,6 +47,8 @@
         is_empty/1,
         delete/1,
         open_table/2,
+
+        now_microsec/0,
     
 	    check_tables_ready/0,
 	    check_prepared_empty/0,
@@ -78,6 +84,7 @@
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 inmemory_store :: cache_id(),
+                max_ts=0 :: non_neg_integer(),
                 %Statistics
                 total_time :: non_neg_integer(),
                 prepare_count :: non_neg_integer(),
@@ -104,7 +111,7 @@ read_data_item(Node, Key, TxId) ->
 async_read_data_item(Node, Key, TxId) ->
     Self = {fsm, undefined, self()},
     riak_core_vnode_master:command(Node,
-                                   {async_read, Key, TxId, Self, clock_service:now_microsec()},
+                                   {async_read, Key, TxId, Self, now_microsec()},
                                    Self,
                                    ?CLOCKSI_MASTER).
 
@@ -145,6 +152,11 @@ abort(ListofNodes, TxId) ->
 						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
+
+get_and_update_ts(Node, CausalClock) ->
+    riak_core_vnode_master:sync_command(Node,
+                            {get_and_update_ts, CausalClock},
+                            ?CLOCKSI_MASTER, infinity).
 
 get_cache_name(Partition,Base) ->
     list_to_atom(atom_to_list(Base) ++ "-" ++ integer_to_list(Partition)).
@@ -274,39 +286,40 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
 handle_command({check_servers_ready},_Sender,SD0) ->
     {reply, true, SD0};
 
-handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked,
+handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, max_ts=MaxTS,
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
-    clock_service:update_ts(TxId#tx_id.snapshot_time),
+    MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
     case readitem:check_prepared(Key, TxId, PreparedTxs) of
         {not_ready, Delay} ->
             spawn(partition_vnode, async_send_msg, [Delay, {async_read, Key, TxId,
-                         Sender, clock_service:now_microsec()}, {Partition, node()}]),
+                         Sender, now_microsec()}, {Partition, node()}]),
             %lager:info("Not ready for key ~w ~w, reader is ~w",[Key, TxId, Sender]),
-            {noreply, SD0#state{num_blocked=NumBlocked+1}};
+            {noreply, SD0#state{num_blocked=NumBlocked+1, max_ts=MaxTS1}};
         ready ->
             Result = readitem:return(Key, TxId, InMemoryStore),
-            {reply, Result, SD0}
+            {reply, Result, SD0#state{max_ts=MaxTS1}}
     end;
 
 
-handle_command({async_read, Key, TxId, OrgSender, LastTime}, _Sender,SD0=#state{num_blocked=NumBlocked, blocked_time=BlockedTime, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
+handle_command({async_read, Key, TxId, OrgSender, LastTime}, _Sender,SD0=#state{num_blocked=NumBlocked, blocked_time=BlockedTime, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition, max_ts=MaxTS}) ->
     %lager:info("Got async read request for key ~w of tx ~w",[Key, TxId]),
-    clock_service:update_ts(TxId#tx_id.snapshot_time),
+    MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
     case readitem:check_prepared(Key, TxId, PreparedTxs) of
         {not_ready, Delay} ->
             spawn(partition_vnode, async_send_msg, [Delay, {async_read, Key, TxId,
                          OrgSender, LastTime}, {Partition, node()}]),
-            {noreply, SD0#state{num_blocked=NumBlocked+1}};
+            {noreply, SD0#state{num_blocked=NumBlocked+1, max_ts=MaxTS1}};
         ready ->
             Result = readitem:return(Key, TxId, InMemoryStore),
             riak_core_vnode:reply(OrgSender, Result),
-            {noreply, SD0#state{blocked_time=BlockedTime+clock_service:now_microsec()-LastTime}}
+            {noreply, SD0#state{blocked_time=BlockedTime+now_microsec()-LastTime, max_ts=MaxTS1}}
     end;
 
 handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
                               committed_tx=CommittedTx,
+                              max_ts=MaxTS,
                               if_certify=IfCertify,
                               total_time=TotalTime,
                               prepare_count=PrepareCount,
@@ -314,19 +327,21 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               prepared_txs=PreparedTxs
                               }) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, IfCertify),
+    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify),
     case Result of
         {ok, PrepareTime} ->
-            UsedTime = clock_service:now_microsec() - PrepareTime,
+            UsedTime = now_microsec() - PrepareTime,
             case IfReplicate of
                 true ->
                     PendingRecord = {prepare, OriginalSender, 
                             {prepared, PrepareTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}};
+                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
+                                            max_ts=PrepareTime}};
                 false ->
                     riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime}),
-                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1}} 
+                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
+                                            max_ts=PrepareTime}} 
             end;
         {error, wait_more} ->
             spawn(partition_vnode, async_send_msg, [2, {prepare, TxId, 
@@ -344,25 +359,26 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                               if_certify=IfCertify,
                               committed_tx=CommittedTx,
                               prepared_txs=PreparedTxs,
+                              max_ts=MaxTS,
                               inmemory_store=InMemoryStore,
                               num_cert_fail=NumCertFail,
                               num_committed=NumCommitted
                               }) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare_and_commit(TxId, WriteSet, CommittedTx, PreparedTxs, InMemoryStore, IfCertify), 
+    Result = prepare_and_commit(TxId, WriteSet, CommittedTx, PreparedTxs, InMemoryStore, MaxTS, IfCertify), 
     case Result of
-        {ok, {committed, CommitTime, NewCommittedTx}} ->
+        {ok, {committed, CommitTime, NewCommittedTx}}->
             case IfReplicate of
                 true ->
                     PendingRecord = {commit, OriginalSender, 
                         {committed, CommitTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State#state{committed_tx=NewCommittedTx, 
-                            num_committed=NumCommitted+1}};
+                            num_committed=NumCommitted+1, max_ts=CommitTime}};
                 false ->
                     riak_core_vnode:reply(OriginalSender, {committed, CommitTime}),
                     {noreply, State#state{committed_tx=NewCommittedTx,
-                            num_committed=NumCommitted+1}}
+                            num_committed=NumCommitted+1, max_ts=CommitTime}}
             end;
         {error, wait_more}->
             spawn(partition_vnode, async_send_msg, [2, {prepare, TxId, 
@@ -412,12 +428,15 @@ handle_command({abort, TxId, Updates}, _Sender,
             {noreply, State#state{num_aborted=NumAborted+1}}
     end;
 
-%% @doc Return active transactions in prepare state with their preparetime
-handle_command({get_active_txns}, _Sender,
-               #state{prepared_txs=Prepared} = State) ->
-    ActiveTxs = ets:lookup(Prepared, active),
-    {reply, {ok, ActiveTxs}, State};
 
+%%%%%%%%%%%%%%  Handle clock-related commands   %%%%%%%%%%%%%%%%%%%%%%%%
+handle_command({get_and_update_ts, CausalTS}, _Sender, #state{max_ts=TS}=State) ->
+    Now = now_microsec(),
+    Max2 = max(CausalTS, max(Now, TS)) + 1,
+    {reply, Max2, State#state{max_ts=Max2}};
+
+
+%%%%%%%%%%% Other handling %%%%%%%%%%%%%
 handle_command({start_read_servers}, _Sender, State) ->
     {reply, ok, State};
 
@@ -466,10 +485,10 @@ async_send_msg(Delay, Msg, To) ->
     timer:sleep(Delay),
     riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
 
-prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
+prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            PrepareTime = clock_service:increment_ts(TxId#tx_id.snapshot_time),
+            PrepareTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
 		    set_prepared(PreparedTxs, TxWriteSet, TxId,PrepareTime),
 		    {ok, PrepareTime};
 	    false ->
@@ -478,10 +497,10 @@ prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify)->
             {error, wait_more}
     end.
 
-prepare_and_commit(TxId, TxWriteSet, CommittedTx, PreparedTxs, InMemoryStore, IfCertify)->
+prepare_and_commit(TxId, TxWriteSet, CommittedTx, PreparedTxs, InMemoryStore, MaxTS, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            CommitTime = clock_service:increment_ts(TxId#tx_id.snapshot_time),
+            CommitTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
             case TxWriteSet of
                   [Key | _Rest] ->
                       update_store(TxWriteSet, TxId, CommitTime, InMemoryStore),
@@ -515,16 +534,6 @@ commit(TxId, TxCommitTime, Updates, CommittedTx,
             {error, no_updates}
     end.
 
-
-%% @doc clean_and_notify:
-%%      This function is used for cleanning the state a transaction
-%%      stores in the vnode while it is being procesed. Once a
-%%      transaction commits or aborts, it is necessary to:
-%%      1. notify all read_fsms that are waiting for this transaction to finish
-%%      2. clean the state of the transaction. Namely:
-%%      a. ActiteTxsPerKey,
-%%      b. PreparedTxs
-%%
 clean_prepared(_PreparedTxs,[],_TxId) ->
     ok;
 clean_prepared(PreparedTxs,[{Key, _Op} | Rest],TxId) ->
@@ -612,3 +621,14 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, InMemoryStore) ->
     update_store(Rest, TxId, TxCommitTime, InMemoryStore),
     ok.
 
+%%%%%%%%%%%%%%%%%%%%%
+update_ts(SnapshotTS, MaxTS) ->
+    max(SnapshotTS, MaxTS).
+
+increment_ts(SnapshotTS, MaxTS) ->
+    max(SnapshotTS, MaxTS) + 1.
+
+%% @doc converts a tuple {MegaSecs,Secs,MicroSecs} into microseconds
+now_microsec() ->
+    {MegaSecs, Secs, MicroSecs} = now(),
+    (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs.

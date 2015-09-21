@@ -8,14 +8,14 @@
 
 
 test_dict(Size, Time) ->
-    Time1 = clock_service:now_microsec(),
+    Time1 = partition_vnode:now_microsec(),
     List = lists:seq(1, Size),
     Dict = dict:new(),
     FinalDict = lists:foldl(fun(X, NewDict) -> dict:store(X, X, NewDict) end, Dict, List),
-    Time2 = clock_service:now_microsec(),
+    Time2 = partition_vnode:now_microsec(),
     lager:info("Initialization used: ~w",[Time2-Time1]),
     iterate_dict(FinalDict, Time, 0),
-    Time3 = clock_service:now_microsec(),
+    Time3 = partition_vnode:now_microsec(),
     lager:info("Iteration used: ~w",[Time3-Time2]).
 
 
@@ -26,15 +26,15 @@ iterate_dict(Dict, Num, Acc) ->
     iterate_dict(Dict, Num-1, Acc+V).
 
 test_ets(Size, Time) ->
-    Time1 = clock_service:now_microsec(),
+    Time1 = partition_vnode:now_microsec(),
     List = lists:seq(1, Size),
     Ets =ets:new(test_ets,
         [set,protected,named_table]),
     _ = lists:map(fun(X) -> ets:insert(Ets, {X, X}) end, List),
-    Time2 = clock_service:now_microsec(),
+    Time2 = partition_vnode:now_microsec(),
     lager:info("Initialization used: ~w",[Time2-Time1]),
     iterate_ets(Ets, Time, 0),
-    Time3 = clock_service:now_microsec(),
+    Time3 = partition_vnode:now_microsec(),
     lager:info("Iteration used: ~w",[Time3-Time2]),
     ets:delete(Ets).
 

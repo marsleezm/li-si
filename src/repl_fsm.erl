@@ -101,7 +101,7 @@ init([Partition]) ->
     LogSize = antidote_config:get(log_size),
     Mode = antidote_config:get(mode),
     Delay = antidote_config:get(delay),
-    Successors = [get_replfsm_name(Index) || {Index, _Node} <- log_utilities:get_my_next(Partition, ReplFactor-1)],
+    Successors = [get_replfsm_name(Index) || {Index, _Node} <- hash_fun:get_my_next(Partition, ReplFactor-1)],
     ReplicatedLog = partition_vnode:open_table(Partition, repl_log),
     PendingLog = partition_vnode:open_table(Partition, pending_log),
     {ok, #state{partition=Partition,
