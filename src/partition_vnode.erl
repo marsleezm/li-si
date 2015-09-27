@@ -278,7 +278,7 @@ handle_command({check_servers_ready},_Sender,SD0) ->
 handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, max_ts=MaxTS,
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore}) ->
     MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
-    case ready_or_block(Key, TxId, PreparedTxs, Sender) of
+    case ready_or_block(TxId, Key, PreparedTxs, Sender) of
         not_ready ->
             %lager:info("Not ready for key ~w ~w, reader is ~w",[Key, TxId, Sender]),
             {noreply, SD0#state{num_blocked=NumBlocked+1, max_ts=MaxTS1}};
@@ -551,7 +551,7 @@ check_prepared(_TxId, PreparedTxs, Key) ->
             false
     end.
 
-ready_or_block(TxId, PreparedTxs, Key, Sender) ->
+ready_or_block(TxId, Key, PreparedTxs, Sender) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     case ets:lookup(PreparedTxs, Key) of
         [] ->
