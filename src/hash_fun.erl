@@ -42,9 +42,7 @@ get_preflist_from_key(Key) ->
 
 -spec get_local_nodes() -> preflist().
 get_local_nodes() ->
-    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
-    PartitionList = chashbin:to_list(CHBin),
-    lager:info("All nodes are ~w", [PartitionList]),
+    PartitionList = get_partitions(),
     MyNode = node(),
     [{Part,Node} || {Part, Node}  <- PartitionList, Node == MyNode].
 
@@ -54,8 +52,7 @@ get_local_nodes() ->
 %%      Return: The primaries preflist
 -spec get_primaries_preflist(non_neg_integer()) -> preflist().
 get_primaries_preflist(Key)->
-    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
-    PartitionList = chashbin:to_list(CHBin),
+    PartitionList = get_partitions(),
     Pos = Key rem length(PartitionList) + 1,
     [lists:nth(Pos, PartitionList)].
 
@@ -112,9 +109,18 @@ convert_key(Key) ->
             end
     end.
 
+get_partitions() ->
+    case ets:lookup(meta_info, partitions) of
+        [] ->
+            {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
+            PartitionList = chashbin:to_list(CHBin),
+            ets:insert(meta_info, {partitions, PartitionList}),
+            PartitionList;
+        [{partitions, PartitionList}] ->
+            PartitionList
+    end.
+
 -ifdef(TEST).
-
-
 
 %% @doc Testing remove_node_from_preflist
 remove_node_from_preflist_test()->
