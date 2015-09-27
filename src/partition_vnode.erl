@@ -25,17 +25,14 @@
 
 -export([start_vnode/1,
 	    read_data_item/3,
-	    async_read_data_item/3,
 	    get_cache_name/2,
         set_prepared/4,
-        async_send_msg/3,
         update_store/4,
 
         get_and_update_ts/2,
         update_ts/2,
         increment_ts/2,
 
-        check_prepared/3,
         certification_check/5,
         prepare/2,
         commit/3,
@@ -106,14 +103,6 @@ read_data_item(Node, Key, TxId) ->
     riak_core_vnode_master:sync_command(Node,
                                    {read, Key, TxId},
                                    ?CLOCKSI_MASTER, infinity).
-
-%% @doc Sends a read request to the Node that is responsible for the Key
-async_read_data_item(Node, Key, TxId) ->
-    Self = {fsm, undefined, self()},
-    riak_core_vnode_master:command(Node,
-                                   {async_read, Key, TxId, Self, now_microsec()},
-                                   Self,
-                                   ?CLOCKSI_MASTER).
 
 %% @doc Sends a prepare request to a Node involved in a tx identified by TxId
 prepare(ListofNodes, TxId) ->
@@ -287,32 +276,15 @@ handle_command({check_servers_ready},_Sender,SD0) ->
     {reply, true, SD0};
 
 handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, max_ts=MaxTS,
-            prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition}) ->
+            prepared_txs=PreparedTxs, inmemory_store=InMemoryStore}) ->
     MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
-    case readitem:check_prepared(Key, TxId, PreparedTxs) of
-        {not_ready, Delay} ->
-            spawn(partition_vnode, async_send_msg, [Delay, {async_read, Key, TxId,
-                         Sender, now_microsec()}, {Partition, node()}]),
+    case ready_or_block(Key, TxId, PreparedTxs, Sender) of
+        not_ready ->
             %lager:info("Not ready for key ~w ~w, reader is ~w",[Key, TxId, Sender]),
             {noreply, SD0#state{num_blocked=NumBlocked+1, max_ts=MaxTS1}};
         ready ->
-            Result = readitem:return(Key, TxId, InMemoryStore),
+            Result = read_value(Key, TxId, InMemoryStore),
             {reply, Result, SD0#state{max_ts=MaxTS1}}
-    end;
-
-
-handle_command({async_read, Key, TxId, OrgSender, LastTime}, _Sender,SD0=#state{num_blocked=NumBlocked, blocked_time=BlockedTime, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, partition=Partition, max_ts=MaxTS}) ->
-    %lager:info("Got async read request for key ~w of tx ~w",[Key, TxId]),
-    MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
-    case readitem:check_prepared(Key, TxId, PreparedTxs) of
-        {not_ready, Delay} ->
-            spawn(partition_vnode, async_send_msg, [Delay, {async_read, Key, TxId,
-                         OrgSender, LastTime}, {Partition, node()}]),
-            {noreply, SD0#state{num_blocked=NumBlocked+1, max_ts=MaxTS1}};
-        ready ->
-            Result = readitem:return(Key, TxId, InMemoryStore),
-            riak_core_vnode:reply(OrgSender, Result),
-            {noreply, SD0#state{blocked_time=BlockedTime+now_microsec()-LastTime, max_ts=MaxTS1}}
     end;
 
 handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
@@ -343,10 +315,6 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                     {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
                                             max_ts=PrepareTime}} 
             end;
-        {error, wait_more} ->
-            spawn(partition_vnode, async_send_msg, [2, {prepare, TxId, 
-                        WriteSet, OriginalSender}, {Partition, node()}]),
-            {noreply, State};
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, {abort, TxId}),
             %gen_fsm:send_event(OriginalSender, abort),
@@ -380,10 +348,6 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                     {noreply, State#state{committed_tx=NewCommittedTx,
                             num_committed=NumCommitted+1, max_ts=CommitTime}}
             end;
-        {error, wait_more}->
-            spawn(partition_vnode, async_send_msg, [2, {prepare, TxId, 
-                        WriteSet, OriginalSender}, {Partition, node()}]),
-            {noreply, State};
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, abort),
             {noreply, State#state{num_cert_fail=NumCertFail+1}}
@@ -419,12 +383,13 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
     end;
 
 handle_command({abort, TxId, Updates}, _Sender,
-               #state{partition=_Partition, prepared_txs=PreparedTxs, num_aborted=NumAborted} = State) ->
+               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore,
+                    num_aborted=NumAborted} = State) ->
     case Updates of
         [] ->
             {reply, {error, no_tx_record}, State};
         _ -> 
-            clean_prepared(PreparedTxs,Updates,TxId),
+            clean_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
             {noreply, State#state{num_aborted=NumAborted+1}}
     end;
 
@@ -481,10 +446,6 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
-async_send_msg(Delay, Msg, To) ->
-    timer:sleep(Delay),
-    riak_core_vnode_master:command(To, Msg, To, ?CLOCKSI_MASTER).
-
 prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
@@ -519,7 +480,7 @@ prepare_and_commit(TxId, TxWriteSet, CommittedTx, PreparedTxs, InMemoryStore, Ma
 set_prepared(_PreparedTxs,[],_TxId,_Time) ->
     ok;
 set_prepared(PreparedTxs,[Key | Rest],TxId,Time) ->
-    true = ets:insert(PreparedTxs, {Key, {TxId, Time}}),
+    true = ets:insert(PreparedTxs, {Key, {TxId, Time, []}}),
     set_prepared(PreparedTxs,Rest,TxId,Time).
 
 commit(TxId, TxCommitTime, Updates, CommittedTx, 
@@ -528,28 +489,32 @@ commit(TxId, TxCommitTime, Updates, CommittedTx,
         [{Key, _Value} | _Rest] -> 
             update_store(Updates, TxId, TxCommitTime, InMemoryStore),
             NewDict = dict:store(Key, TxCommitTime, CommittedTx),
-            clean_prepared(PreparedTxs,Updates,TxId),
+            clean_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
             {ok, {committed, NewDict}};
         _ -> 
             {error, no_updates}
     end.
 
-clean_prepared(_PreparedTxs,[],_TxId) ->
+clean_prepared(_PreparedTxs,[],_TxId,_) ->
     ok;
-clean_prepared(PreparedTxs,[{Key, _Op} | Rest],TxId) ->
+clean_prepared(PreparedTxs,[{Key, _Op} | Rest],TxId,InMemoryStore) ->
     case ets:lookup(PreparedTxs, Key) of
-        [{Key, {TxId, _Time}}] ->
+        [{Key, {TxId, _Time, PendingReaders}}] ->
+            case ets:lookup(InMemoryStore, Key) of
+                [{Key, ValueList}] ->
+                    lists:foreach(fun(Sender) -> riak_vnode:reply(Sender, hd(ValueList)) end, 
+                            PendingReaders);
+                [] ->
+                    lists:foreach(fun(Sender) -> riak_vnode:reply(Sender, nil) end, PendingReaders)
+            end,
             true = ets:delete(PreparedTxs, Key);
         _ ->
             ok
     end,   
-    clean_prepared(PreparedTxs,Rest,TxId).
-
+    clean_prepared(PreparedTxs,Rest,TxId, InMemoryStore).
 
 %% @doc Performs a certification check when a transaction wants to move
 %%      to the prepared state.
-%certification_check(_TxId, _H, _CommittedTx, _PreparedTxs) ->
-%    true.
 certification_check(_, _, _, _, false) ->
     true;
 certification_check(_, [], _, _, true) ->
@@ -566,9 +531,7 @@ certification_check(TxId, [Key|T], CommittedTx, PreparedTxs, true) ->
                         true ->
                             certification_check(TxId, T, CommittedTx, PreparedTxs, true);
                         false ->
-                            false;
-                        wait ->
-                            wait
+                            false
                     end
             end;
         error ->
@@ -576,29 +539,30 @@ certification_check(TxId, [Key|T], CommittedTx, PreparedTxs, true) ->
                 true ->
                     certification_check(TxId, T, CommittedTx, PreparedTxs, true); 
                 false ->
-                    false;
-                wait ->
-                    wait
+                    false
             end
     end.
 
-check_prepared(TxId, PreparedTxs, Key) ->
-    SnapshotTime = TxId#tx_id.snapshot_time,
+check_prepared(_TxId, PreparedTxs, Key) ->
     case ets:lookup(PreparedTxs, Key) of
         [] ->
             true;
-        [{Key, {_TxId1, PrepareTime}}] ->
-            case PrepareTime > SnapshotTime of
+        _ ->
+            false
+    end.
+
+ready_or_block(TxId, PreparedTxs, Key, Sender) ->
+    SnapshotTime = TxId#tx_id.snapshot_time,
+    case ets:lookup(PreparedTxs, Key) of
+        [] ->
+            ready;
+        [{Key, {PreparedTxId, PrepareTime, PendingReader}}] ->
+            case PrepareTime =< SnapshotTime of
                 true ->
-                    %lager:info("Has to abort for Key ~w", [Key]),
-                    false;
+                    ets:insert({Key, {PreparedTxId, PrepareTime, [Sender|PendingReader]}}),
+                    not_ready;
                 false ->
-                    %case random:uniform(2) of
-                    %    1 ->
-                            false
-                    %    2 ->
-                    %        wait  
-                    %end
+                    ready
             end
     end.
 
@@ -618,8 +582,30 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, InMemoryStore) ->
             NewSnapshot = update_object:update(First, Op, Param),
             true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]})
     end,
-    update_store(Rest, TxId, TxCommitTime, InMemoryStore),
-    ok.
+    update_store(Rest, TxId, TxCommitTime, InMemoryStore).
+
+%% @doc return:
+%%  - Reads and returns the log of specified Key using replication layer.
+read_value(Key, TxId, InMemoryStore) ->
+    %lager:info("Returning for key ~w",[Key]),
+    case ets:lookup(InMemoryStore, Key) of
+        [] ->
+            {ok, nil};
+        [{Key, ValueList}] ->
+            MyClock = TxId#tx_id.snapshot_time,
+            find_version(ValueList, MyClock)
+    end.
+
+%%%%%%%%%Intenal%%%%%%%%%%%%%%%%%%
+find_version([], _SnapshotTime) ->
+    {ok, nil};
+find_version([{TS, Value}|Rest], SnapshotTime) ->
+    case SnapshotTime >= TS of
+        true ->
+            {ok, Value};
+        false ->
+            find_version(Rest, SnapshotTime)
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%
 update_ts(SnapshotTS, MaxTS) ->
