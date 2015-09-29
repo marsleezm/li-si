@@ -27,13 +27,12 @@
 	    read_data_item/3,
 	    get_cache_name/2,
         set_prepared/4,
-        update_store/4,
+        update_store/5,
 
         get_and_update_ts/2,
         update_ts/2,
         increment_ts/2,
 
-        certification_check/5,
         prepare/2,
         commit/3,
         single_commit/2,
@@ -46,7 +45,6 @@
         open_table/2,
 
         now_microsec/0,
-    
 	    check_tables_ready/0,
 	    check_prepared_empty/0,
         print_stat/0]).
@@ -77,7 +75,7 @@
 %%----------------------------------------------------------------------
 -record(state, {partition :: non_neg_integer(),
                 prepared_txs :: cache_id(),
-                committed_tx :: dict(),
+                committed_txs :: cache_id(),
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 inmemory_store :: cache_id(),
@@ -155,7 +153,7 @@ get_cache_name(Partition,Base) ->
 %%      the transactions it participates on.
 init([Partition]) ->
     PreparedTxs = open_table(Partition, prepared),
-    CommittedTx = dict:new(),
+    CommittedTxs = open_table(Partition, committed),
     %%true = ets:insert(PreparedTxs, {committed_tx, dict:new()}),
     InMemoryStore = open_table(Partition, inmemory_store),
 
@@ -170,7 +168,7 @@ init([Partition]) ->
                 end,
 
     {ok, #state{partition=Partition,
-                committed_tx=CommittedTx,
+                committed_txs=CommittedTxs,
                 prepared_txs=PreparedTxs,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
@@ -272,9 +270,6 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
             {reply, false, SD0}
     end;
 
-handle_command({check_servers_ready},_Sender,SD0) ->
-    {reply, true, SD0};
-
 handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, max_ts=MaxTS,
             prepared_txs=PreparedTxs, inmemory_store=InMemoryStore}) ->
     MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
@@ -290,7 +285,7 @@ handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, max
 handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
-                              committed_tx=CommittedTx,
+                              committed_txs=CommittedTxs,
                               max_ts=MaxTS,
                               if_certify=IfCertify,
                               total_time=TotalTime,
@@ -299,7 +294,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               prepared_txs=PreparedTxs
                               }) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare(TxId, WriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify),
+    Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, MaxTS, IfCertify),
     case Result of
         {ok, PrepareTime} ->
             UsedTime = now_microsec() - PrepareTime,
@@ -316,7 +311,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                                             max_ts=PrepareTime}} 
             end;
         {error, write_conflict} ->
-            riak_core_vnode:reply(OriginalSender, {abort, TxId}),
+            riak_core_vnode:reply(OriginalSender, abort),
             %gen_fsm:send_event(OriginalSender, abort),
             {noreply, State#state{num_cert_fail=NumCertFail+1, prepare_count=PrepareCount+1}}
     end;
@@ -325,7 +320,7 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
                               if_certify=IfCertify,
-                              committed_tx=CommittedTx,
+                              committed_txs=CommittedTxs,
                               prepared_txs=PreparedTxs,
                               max_ts=MaxTS,
                               inmemory_store=InMemoryStore,
@@ -333,20 +328,18 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                               num_committed=NumCommitted
                               }) ->
     %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare_and_commit(TxId, WriteSet, CommittedTx, PreparedTxs, InMemoryStore, MaxTS, IfCertify), 
+    Result = prepare_and_commit(TxId, WriteSet, CommittedTxs, PreparedTxs, InMemoryStore, MaxTS, IfCertify), 
     case Result of
-        {ok, {committed, CommitTime, NewCommittedTx}}->
+        {ok, {committed, CommitTime}}->
             case IfReplicate of
                 true ->
                     PendingRecord = {commit, OriginalSender, 
                         {committed, CommitTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{committed_tx=NewCommittedTx, 
-                            num_committed=NumCommitted+1, max_ts=CommitTime}};
+                    {noreply, State#state{num_committed=NumCommitted+1, max_ts=CommitTime}};
                 false ->
                     riak_core_vnode:reply(OriginalSender, {committed, CommitTime}),
-                    {noreply, State#state{committed_tx=NewCommittedTx,
-                            num_committed=NumCommitted+1, max_ts=CommitTime}}
+                    {noreply, State#state{num_committed=NumCommitted+1, max_ts=CommitTime}}
             end;
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, abort),
@@ -358,25 +351,23 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
 %% eventually.
 handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
                #state{partition=Partition,
-                      committed_tx=CommittedTx,
+                      committed_txs=CommittedTxs,
                       if_replicate=IfReplicate,
                       prepared_txs=PreparedTxs,
                       inmemory_store=InMemoryStore,
                       num_committed=NumCommitted
                       } = State) ->
-    Result = commit(TxId, TxCommitTime, Updates, CommittedTx, PreparedTxs, InMemoryStore),
+    Result = commit(TxId, TxCommitTime, Updates, CommittedTxs, PreparedTxs, InMemoryStore),
     case Result of
-        {ok, {committed,NewCommittedTx}} ->
+        {ok, committed} ->
             case IfReplicate of
                 true ->
                     PendingRecord = {commit, Sender, 
                         false, {TxId, TxCommitTime, Updates}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{committed_tx=NewCommittedTx,
-                            num_committed=NumCommitted+1}};
+                    {noreply, State#state{num_committed=NumCommitted+1}};
                 false ->
-                    {noreply, State#state{committed_tx=NewCommittedTx,
-                            num_committed=NumCommitted+1}}
+                    {noreply, State#state{num_committed=NumCommitted+1}}
             end;
         {error, no_updates} ->
             {reply, no_tx_record, State}
@@ -402,9 +393,6 @@ handle_command({get_and_update_ts, CausalTS}, _Sender, #state{max_ts=TS}=State) 
 
 
 %%%%%%%%%%% Other handling %%%%%%%%%%%%%
-handle_command({start_read_servers}, _Sender, State) ->
-    {reply, ok, State};
-
 handle_command(_Message, _Sender, State) ->
     {noreply, State}.
 
@@ -441,6 +429,7 @@ handle_exit(_Pid, _Reason, State) ->
 terminate(_Reason, #state{partition=Partition} = _State) ->
     ets:delete(get_cache_name(Partition,prepared)),
     ets:delete(get_cache_name(Partition,inmemory_store)),
+    ets:delete(get_cache_name(Partition,committed)),
     ok.
 
 %%%===================================================================
@@ -458,18 +447,12 @@ prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
             {error, wait_more}
     end.
 
-prepare_and_commit(TxId, TxWriteSet, CommittedTx, PreparedTxs, InMemoryStore, MaxTS, IfCertify)->
-    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
+prepare_and_commit(TxId, TxWriteSet, CommittedTxs, PreparedTxs, InMemoryStore, MaxTS, IfCertify)->
+    case certification_check(TxId, TxWriteSet, CommittedTxs, PreparedTxs, IfCertify) of
         true ->
             CommitTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
-            case TxWriteSet of
-                  [Key | _Rest] ->
-                      update_store(TxWriteSet, TxId, CommitTime, InMemoryStore),
-                      NewDict = dict:store(Key, CommitTime, CommittedTx),
-                      {ok, {committed, CommitTime, NewDict}};
-                  _ ->
-                      {error, no_updates}
-            end;
+            update_store(TxWriteSet, TxId, CommitTime, CommittedTxs, InMemoryStore),
+            {ok, {committed, CommitTime}};
 	    false ->
 	        {error, write_conflict};
         wait ->
@@ -483,29 +466,24 @@ set_prepared(PreparedTxs,[Key | Rest],TxId,Time) ->
     true = ets:insert(PreparedTxs, {Key, {TxId, Time, []}}),
     set_prepared(PreparedTxs,Rest,TxId,Time).
 
-commit(TxId, TxCommitTime, Updates, CommittedTx, 
+commit(TxId, TxCommitTime, Updates, CommittedTxs, 
                                 PreparedTxs, InMemoryStore)->
-    case Updates of
-        [{Key, _Value} | _Rest] -> 
-            update_store(Updates, TxId, TxCommitTime, InMemoryStore),
-            NewDict = dict:store(Key, TxCommitTime, CommittedTx),
-            clean_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
-            {ok, {committed, NewDict}};
-        _ -> 
-            {error, no_updates}
-    end.
+    update_store(Updates, TxId, TxCommitTime, CommittedTxs, InMemoryStore),
+    clean_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
+    {ok, committed}.
 
 clean_prepared(_PreparedTxs,[],_TxId,_) ->
     ok;
-clean_prepared(PreparedTxs,[{Key, _Op} | Rest],TxId,InMemoryStore) ->
+clean_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore) ->
     case ets:lookup(PreparedTxs, Key) of
         [{Key, {TxId, _Time, PendingReaders}}] ->
             case ets:lookup(InMemoryStore, Key) of
                 [{Key, ValueList}] ->
-                    lists:foreach(fun(Sender) -> riak_vnode:reply(Sender, hd(ValueList)) end, 
+                    {_, Value}=hd(ValueList),
+                    lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok, Value}) end, 
                             PendingReaders);
                 [] ->
-                    lists:foreach(fun(Sender) -> riak_vnode:reply(Sender, nil) end, PendingReaders)
+                    lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok,nil}) end, PendingReaders)
             end,
             true = ets:delete(PreparedTxs, Key);
         _ ->
@@ -519,25 +497,25 @@ certification_check(_, _, _, _, false) ->
     true;
 certification_check(_, [], _, _, true) ->
     true;
-certification_check(TxId, [Key|T], CommittedTx, PreparedTxs, true) ->
+certification_check(TxId, [Key|T], CommittedTxs, PreparedTxs, true) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
-    case dict:find(Key, CommittedTx) of
-        {ok, CommitTime} ->
+    case ets:lookup(CommittedTxs, Key) of
+        [{Key, CommitTime}] ->
             case CommitTime > SnapshotTime of
                 true ->
                     false;
                 false ->
                     case check_prepared(TxId, PreparedTxs, Key) of
                         true ->
-                            certification_check(TxId, T, CommittedTx, PreparedTxs, true);
+                            certification_check(TxId, T, CommittedTxs, PreparedTxs, true);
                         false ->
                             false
                     end
             end;
-        error ->
+        [] ->
             case check_prepared(TxId, PreparedTxs, Key) of
                 true ->
-                    certification_check(TxId, T, CommittedTx, PreparedTxs, true); 
+                    certification_check(TxId, T, CommittedTxs, PreparedTxs, true); 
                 false ->
                     false
             end
@@ -559,7 +537,7 @@ ready_or_block(TxId, Key, PreparedTxs, Sender) ->
         [{Key, {PreparedTxId, PrepareTime, PendingReader}}] ->
             case PrepareTime =< SnapshotTime of
                 true ->
-                    ets:insert({Key, {PreparedTxId, PrepareTime, [Sender|PendingReader]}}),
+                    ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime, [Sender|PendingReader]}}),
                     not_ready;
                 false ->
                     ready
@@ -567,11 +545,11 @@ ready_or_block(TxId, Key, PreparedTxs, Sender) ->
     end.
 
 -spec update_store(KeyValues :: [{key(), atom(), term()}],
-                          TxId::txid(),TxCommitTime:: {term(), term()},
+                          TxId::txid(),TxCommitTime:: {term(), term()}, CommittedTxs :: cache_id(),
                                 InMemoryStore :: cache_id()) -> ok.
-update_store([], _TxId, _TxCommitTime, _InMemoryStore) ->
+update_store([], _TxId, _TxCommitTime, _CommittedTxs, _InMemoryStore) ->
     ok;
-update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, InMemoryStore) ->
+update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemoryStore) ->
     case ets:lookup(InMemoryStore, Key) of
         [] ->
             NewSnapshot = update_object:update(Op, Param),
@@ -582,12 +560,12 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, InMemoryStore) ->
             NewSnapshot = update_object:update(First, Op, Param),
             true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]})
     end,
-    update_store(Rest, TxId, TxCommitTime, InMemoryStore).
+    ets:insert(CommittedTxs, {Key, TxCommitTime}),
+    update_store(Rest, TxId, TxCommitTime, CommittedTxs, InMemoryStore).
 
 %% @doc return:
 %%  - Reads and returns the log of specified Key using replication layer.
 read_value(Key, TxId, InMemoryStore) ->
-    %lager:info("Returning for key ~w",[Key]),
     case ets:lookup(InMemoryStore, Key) of
         [] ->
             {ok, nil};
@@ -607,7 +585,6 @@ find_version([{TS, Value}|Rest], SnapshotTime) ->
             find_version(Rest, SnapshotTime)
     end.
 
-%%%%%%%%%%%%%%%%%%%%%
 update_ts(SnapshotTS, MaxTS) ->
     max(SnapshotTS, MaxTS).
 

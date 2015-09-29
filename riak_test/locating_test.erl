@@ -45,8 +45,8 @@ confirm() ->
 
     [First|_]=Nodes,
     Key = 100,
-    [{Part,Node}] = rpc:call(First, log_utilities, get_preflist_from_key, [Key]),
-    Next = rpc:call(First, log_utilities, get_my_next, [Part, 3]),
+    [{Part,Node}] = rpc:call(First, hash_fun, get_preflist_from_key, [Key]),
+    Next = rpc:call(First, hash_fun, get_my_next, [Part, 3]),
 
     {ok, CHBin} = rpc:call(First, riak_core_ring_manager, get_chash_bin, []),
     PartitionList = chashbin:to_list(CHBin),

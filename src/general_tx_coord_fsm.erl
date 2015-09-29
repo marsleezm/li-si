@@ -200,8 +200,9 @@ receive_reply({prepared, ReceivedPrepareTime},
              S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime}}
     end;
 
-receive_reply(abort, S0) ->
-    {next_state, receive_reply, S0};
+receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
+    ?PARTITION_VNODE:abort(UpdatedPartitions, TxId),
+    reply_to_client(S0#state{state=aborted});
 
 receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
     ?PARTITION_VNODE:abort(UpdatedPartitions, TxId),

@@ -41,7 +41,7 @@ confirm() ->
 
 
     %% Identify preference list for a given key.
-    Preflist = rpc:call(N, log_utilities, get_preflist_from_key, [key1]),
+    Preflist = rpc:call(N, hash_fun, get_preflist_from_key, [key1]),
     lager:info("Preference list: ~p", [Preflist]),
 
     NodeList = [Node || {_Index, Node} <- Preflist],
@@ -52,11 +52,11 @@ confirm() ->
 
     %% Perform successful write and read.
     WriteResult = rpc:call(First,
-                           antidote, append, [key1, riak_dt_gcounter, {increment, ucl}]),
+                           antidote, update, [key1, increment, 1]),
     lager:info("WriteResult: ~p", [WriteResult]),
     ?assertMatch({ok, _}, WriteResult),
 
-    ReadResult = rpc:call(First, antidote, read, [key1, riak_dt_gcounter]),
+    ReadResult = rpc:call(First, antidote, read, [key1]),
     lager:info("ReadResult: ~p", [ReadResult]),
     ?assertMatch({ok, 1}, ReadResult),
 
@@ -68,7 +68,7 @@ confirm() ->
     rt:heal(PartInfo),
 
     %% Read after the partition has been healed.
-    ReadResult3 = rpc:call(First, antidote, read, [key1, riak_dt_gcounter]),
+    ReadResult3 = rpc:call(First, antidote, read, [key1]),
     lager:info("ReadResult3: ~p", [ReadResult3]),
     ?assertMatch({ok, 1}, ReadResult3),
 
