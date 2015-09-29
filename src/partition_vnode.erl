@@ -27,7 +27,7 @@
 	    read_data_item/3,
 	    get_cache_name/2,
         set_prepared/4,
-        update_store/5,
+        update_store/6,
 
         get_and_update_ts/2,
         update_ts/2,
@@ -380,7 +380,7 @@ handle_command({abort, TxId, Updates}, _Sender,
         [] ->
             {reply, {error, no_tx_record}, State};
         _ -> 
-            clean_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
+            clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
             {noreply, State#state{num_aborted=NumAborted+1}}
     end;
 
@@ -451,7 +451,7 @@ prepare_and_commit(TxId, TxWriteSet, CommittedTxs, PreparedTxs, InMemoryStore, M
     case certification_check(TxId, TxWriteSet, CommittedTxs, PreparedTxs, IfCertify) of
         true ->
             CommitTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
-            update_store(TxWriteSet, TxId, CommitTime, CommittedTxs, InMemoryStore),
+            update_store(TxWriteSet, TxId, CommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
             {ok, {committed, CommitTime}};
 	    false ->
 	        {error, write_conflict};
@@ -468,20 +468,18 @@ set_prepared(PreparedTxs,[Key | Rest],TxId,Time) ->
 
 commit(TxId, TxCommitTime, Updates, CommittedTxs, 
                                 PreparedTxs, InMemoryStore)->
-    update_store(Updates, TxId, TxCommitTime, CommittedTxs, InMemoryStore),
-    clean_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
+    update_store(Updates, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
     {ok, committed}.
 
-clean_prepared(_PreparedTxs,[],_TxId,_) ->
+clean_abort_prepared(_PreparedTxs,[],_TxId,_) ->
     ok;
-clean_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore) ->
+clean_abort_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore) ->
     case ets:lookup(PreparedTxs, Key) of
         [{Key, {TxId, _Time, PendingReaders}}] ->
             case ets:lookup(InMemoryStore, Key) of
                 [{Key, ValueList}] ->
-                    {_, Value}=hd(ValueList),
-                    lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok, Value}) end, 
-                            PendingReaders);
+                    {_, Value} = hd(ValueList),
+                    lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok,Value}) end, PendingReaders);
                 [] ->
                     lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok,nil}) end, PendingReaders)
             end,
@@ -489,7 +487,7 @@ clean_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore) ->
         _ ->
             ok
     end,   
-    clean_prepared(PreparedTxs,Rest,TxId, InMemoryStore).
+    clean_abort_prepared(PreparedTxs,Rest,TxId, InMemoryStore).
 
 %% @doc Performs a certification check when a transaction wants to move
 %%      to the prepared state.
@@ -537,7 +535,8 @@ ready_or_block(TxId, Key, PreparedTxs, Sender) ->
         [{Key, {PreparedTxId, PrepareTime, PendingReader}}] ->
             case PrepareTime =< SnapshotTime of
                 true ->
-                    ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime, [Sender|PendingReader]}}),
+                    ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime, 
+                        [{TxId#tx_id.snapshot_time, Sender}|PendingReader]}}),
                     not_ready;
                 false ->
                     ready
@@ -546,22 +545,39 @@ ready_or_block(TxId, Key, PreparedTxs, Sender) ->
 
 -spec update_store(KeyValues :: [{key(), atom(), term()}],
                           TxId::txid(),TxCommitTime:: {term(), term()}, CommittedTxs :: cache_id(),
-                                InMemoryStore :: cache_id()) -> ok.
-update_store([], _TxId, _TxCommitTime, _CommittedTxs, _InMemoryStore) ->
+                                InMemoryStore :: cache_id(), PreparedTxs :: cache_id()) -> ok.
+update_store([], _TxId, _TxCommitTime, _CommittedTxs, _InMemoryStore, _PreparedTxs) ->
     ok;
-update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemoryStore) ->
-    case ets:lookup(InMemoryStore, Key) of
-        [] ->
-            NewSnapshot = update_object:update(Op, Param),
-            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]});
-        [{Key, ValueList}] ->
-            {RemainList, _} = lists:split(min(?NUM_VERSION,length(ValueList)), ValueList),
-            [{_CommitTime, First}|_] = RemainList,
-            NewSnapshot = update_object:update(First, Op, Param),
-            true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]})
+update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs) ->
+    Values= case ets:lookup(InMemoryStore, Key) of
+                [] ->
+                    NewSnapshot = update_object:update(Op, Param),
+                    true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}]}),
+                    [nil, NewSnapshot];
+                [{Key, ValueList}] ->
+                    {RemainList, _} = lists:split(min(?NUM_VERSION,length(ValueList)), ValueList),
+                    [{_CommitTime, First}|_] = RemainList,
+                    NewSnapshot = update_object:update(First, Op, Param),
+                    true = ets:insert(InMemoryStore, {Key, [{TxCommitTime, NewSnapshot}|RemainList]}),
+                    {_, FirstValue} = hd(ValueList),
+                    [FirstValue, NewSnapshot]
+            end,
+    case ets:lookup(PreparedTxs, Key) of
+        [{Key, {TxId, _Time, PendingReaders}}] ->
+            lists:foreach(fun({SnapshotTime, Sender}) ->
+                    case SnapshotTime >= TxCommitTime of
+                        true ->
+                            riak_core_vnode:reply(Sender, {ok, lists:nth(Values,2)});
+                        false ->
+                            riak_core_vnode:reply(Sender, {ok, hd(Values)})
+                    end end,
+                PendingReaders),
+            true = ets:delete(PreparedTxs, Key);
+         [] ->
+            ok
     end,
     ets:insert(CommittedTxs, {Key, TxCommitTime}),
-    update_store(Rest, TxId, TxCommitTime, CommittedTxs, InMemoryStore).
+    update_store(Rest, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs).
 
 %% @doc return:
 %%  - Reads and returns the log of specified Key using replication layer.
@@ -595,3 +611,4 @@ increment_ts(SnapshotTS, MaxTS) ->
 now_microsec() ->
     {MegaSecs, Secs, MicroSecs} = now(),
     (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs.
+
