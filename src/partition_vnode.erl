@@ -439,7 +439,7 @@ prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
             PrepareTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
-		    set_prepared(PreparedTxs, TxWriteSet, TxId,PrepareTime),
+		    set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime),
 		    {ok, PrepareTime};
 	    false ->
 	        {error, write_conflict};
@@ -448,7 +448,8 @@ prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
     end.
 
 prepare_and_commit(TxId, TxWriteSet, CommittedTxs, PreparedTxs, InMemoryStore, MaxTS, IfCertify)->
-    case certification_check(TxId, TxWriteSet, CommittedTxs, PreparedTxs, IfCertify) of
+    Keys = [Key|| {Key, _, _} <- TxWriteSet],
+    case certification_check(TxId, Keys, CommittedTxs, PreparedTxs, IfCertify) of
         true ->
             CommitTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
             update_store(TxWriteSet, TxId, CommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
@@ -573,8 +574,10 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemory
                     end end,
                 PendingReaders),
             true = ets:delete(PreparedTxs, Key);
-         [] ->
-            ok
+        [] ->
+            ok;
+        Record ->
+            lager:error("Something is wrong!!! ~w ~w", [TxId, TxCommitTime, Record])
     end,
     ets:insert(CommittedTxs, {Key, TxCommitTime}),
     update_store(Rest, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs).
