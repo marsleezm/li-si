@@ -567,7 +567,7 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemory
             lists:foreach(fun({SnapshotTime, Sender}) ->
                     case SnapshotTime >= TxCommitTime of
                         true ->
-                            riak_core_vnode:reply(Sender, {ok, lists:nth(Values,2)});
+                            riak_core_vnode:reply(Sender, {ok, lists:nth(2, Values)});
                         false ->
                             riak_core_vnode:reply(Sender, {ok, hd(Values)})
                     end end,
