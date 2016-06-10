@@ -220,7 +220,7 @@ single_committing(abort, S0=#state{from=_From, tx_id=TxId, updated_partitions=Up
 reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet, prepare_time=CommitTime}) ->
     case TxState of
         committed ->
-            From ! {ok, {TxId, ReadSet, CommitTime}},
+            From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime}},
             {stop, normal, SD};
         aborted ->
             From ! {error, commit_fail},
