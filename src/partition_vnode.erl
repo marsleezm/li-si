@@ -391,7 +391,6 @@ handle_command({get_and_update_ts, CausalTS}, _Sender, #state{max_ts=TS}=State) 
     Max2 = max(CausalTS, max(Now, TS)) + 1,
     {reply, Max2, State#state{max_ts=Max2}};
 
-
 %%%%%%%%%%% Other handling %%%%%%%%%%%%%
 handle_command(_Message, _Sender, State) ->
     {noreply, State}.
