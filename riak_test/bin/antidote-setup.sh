@@ -3,7 +3,7 @@
 # just bail out if things go south
 set -e
 
-: ${RTEE_DEST_DIR:="$HOME/rt/antidote"}
+: ${RTEE_DEST_DIR:="$HOME/rt/li-si"}
 
 cd "$( dirname "${BASH_SOURCE[0]}" )/../../"
 ANTIDOTE_DIR=$(pwd)
