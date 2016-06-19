@@ -37,20 +37,21 @@ confirm() ->
 %% @doc The following function tests that ClockSI can run a non-interactive tx
 %%      that updates multiple partitions.
 clocksi_test1(Nodes) ->
-    FirstNode = hd(Nodes),
     lager:info("Test1 started"),
+    FirstNode = hd(Nodes),
     %Type = riak_dt_pncounter,
     %% Empty transaction works,
     Result0=rpc:call(FirstNode, antidote, execute_tx,
                     [[]]),
     ?assertMatch({ok, _}, Result0),
 
+
     % A simple read returns empty
     Result11=rpc:call(FirstNode, antidote, execute_tx,
                     [
                      [{read, key1}]]),
     ?assertMatch({ok, _}, Result11),
-    {ok, {_, ReadSet11, _}}=Result11, 
+    {ok, {_, ReadSet11, _}}=Result11,
     ?assertMatch([nil], ReadSet11),
 
     %% Read what you wrote
@@ -85,12 +86,13 @@ clocksi_test1(Nodes) ->
                      [{read, key1}]]),
     {ok, {_, ReadSet6, _}}=Result6,
     ?assertEqual(3, hd(ReadSet6)),
+    lager:info("Test1 passed"),
     pass.
     
 %% @doc The following function tests that ClockSI can run both a single
 %%      read and a bulk-update tx.
 clocksi_single_key_update_read_test(Nodes) ->
-    lager:info("Test3 started"),
+    lager:info("Test2 started"),
     FirstNode = hd(Nodes),
     Key = k3,
     Result= rpc:call(FirstNode, antidote, execute_tx,
@@ -100,15 +102,15 @@ clocksi_single_key_update_read_test(Nodes) ->
     ?assertMatch({ok, _}, Result),
     {ok,{_,_,CommitTime}} = Result,
     lager:info("Commit Time is ~w", [CommitTime]),
-    Result2= rpc:call(FirstNode, antidote, read,
+    {ok, Result2}= rpc:call(FirstNode, antidote, read,
                       [Key]),
-    {ok, {_, ReadSet, _}}=Result2,
-    ?assertMatch([2], ReadSet),
-    lager:info("Test3 passed"),
+    ?assertMatch(2, Result2),
+    lager:info("Test2 passed"),
     pass.
 
 %% @doc Verify that multiple reads/writes are successful.
 clocksi_multiple_key_update_read_test(Nodes) ->
+    lager:info("Test3 started"),
     Firstnode = hd(Nodes),
     Key1 = keym1,
     Key2 = keym2,
@@ -120,30 +122,34 @@ clocksi_multiple_key_update_read_test(Nodes) ->
                            [Ops]),
     ?assertMatch({ok,{_Txid, _Readset, _Committime}}, Writeresult),
     {ok,{_Txid, _Readset, _Committime}} = Writeresult,
-    {ok,{_,[ReadResult1],_}} = rpc:call(Firstnode, antidote, read,
+    {ok, ReadResult1} = rpc:call(Firstnode, antidote, read,
                                         [Key1]),
-    {ok,{_,[ReadResult2],_}} = rpc:call(Firstnode, antidote, read,
+    {ok, ReadResult2} = rpc:call(Firstnode, antidote, read,
                                         [Key2]),
-    {ok,{_,[ReadResult3],_}} = rpc:call(Firstnode, antidote, read,
+    {ok, ReadResult3} = rpc:call(Firstnode, antidote, read,
                                         [Key3]),
     ?assertMatch(ReadResult1,1),
     ?assertMatch(ReadResult2,10),
     ?assertMatch(ReadResult3,1),
+    lager:info("Test3 passed"),
     pass.
 
 %% @doc Read an update a key multiple times.
 clocksi_multiple_read_update_test(Nodes) ->
+    lager:info("Test4 started"),
     Node = hd(Nodes),
     Key = get_random_key(),
     NTimes = 100,
-    {ok,Result1} = rpc:call(Node, antidote, read,
+    {ok,_} = rpc:call(Node, antidote, read,
                        [Key]),
     lists:foreach(fun(_)->
                           read_update_test(Node, Key) end,
                   lists:seq(1,NTimes)),
     {ok,Result2} = rpc:call(Node, antidote, read,
                        [Key]),
-    ?assertEqual(Result1+NTimes, Result2),
+
+    ?assertEqual(NTimes, Result2),
+    lager:info("Test4 passed"),
     pass.
 
 %% @doc Test updating prior to a read.
@@ -151,13 +157,17 @@ read_update_test(Node, Key) ->
     {ok,Result1} = rpc:call(Node, antidote, read,
                        [Key]),
     {ok,_} = rpc:call(Node, antidote, execute_tx,
-                      [{update, Key, increment, 1}]),
+                      [[{update, Key, increment, 1}]]),
     {ok,Result2} = rpc:call(Node, antidote, read,
                        [Key]),
-    ?assertEqual(Result1+1,Result2),
+    case Result1 of
+      nil ->
+        ?assertEqual(1,Result2);
+      _ ->
+        ?assertEqual(Result1+1,Result2)
+    end,
     pass.
 
 get_random_key() ->
     random:seed(now()),
     random:uniform(1000).
-

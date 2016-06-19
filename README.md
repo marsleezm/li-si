@@ -243,10 +243,14 @@ Running Tests
 ### Running test ###
 
 1. Go to RIAK_TEST directory
-2. ./riak\_test -v -c antidote -t "TEST\_TO\_RUN"
+2. ./riak\_test -v -c li_si -t "TEST\_TO\_RUN"
 
 	TEST\_TO\_RUN is any test module in antidote/riak_test/
 
-	eg:- ./riak_test -v -c antidote -t clocksi_test
+	eg:- ./riak_test -v -c li_si -t clocksi_test
 
+### Compile and run ###
 
+./rebar skip_deps=true compile riak_test_compile
+
+(cd ../riak_test/ && ./riak_test -v -c li_si -t clocksi_test)

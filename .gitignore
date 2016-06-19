@@ -16,3 +16,6 @@ doc/
 log/
 tags
 rel/vars/*.config
+.idea/
+li-si.iml
+others/
