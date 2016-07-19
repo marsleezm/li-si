@@ -29,18 +29,6 @@
 
 -include("antidote.hrl").
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--define(DC_UTIL, mock_partition_fsm).
--define(HASH_FUN, mock_partition_fsm).
--define(PARTITION_VNODE, mock_partition_fsm).
--else.
--define(DC_UTIL, dc_utilities).
--define(HASH_FUN, hash_fun).
--define(PARTITION_VNODE, partition_vnode).
--endif.
-
-
 %% API
 -export([start_link/3, start_link/2]).
 
@@ -76,12 +64,12 @@
 -record(state, {
 	  from :: {pid(), term()},
 	  tx_id :: txid(),
-      operations :: [],
+    operations :: [],
 	  num_to_ack :: non_neg_integer(),
 	  prepare_time :: non_neg_integer(),
-      updated_partitions :: dict(),
-      read_set :: [],
-      causal_clock :: non_neg_integer(),
+    updated_partitions :: dict(),
+    read_set :: [],
+    causal_clock :: non_neg_integer(),
 	  state :: active | prepared | committing | committed | undefined | aborted}).
 
 %%%===================================================================
@@ -103,9 +91,9 @@ stop(Pid) -> gen_fsm:sync_send_all_state_event(Pid,stop).
 -spec perform_singleitem_read(key()) -> {ok,val()} | {error,reason()}.
 perform_singleitem_read(Key) ->
     TxId = tx_utilities:create_transaction_record(0),
-    Preflist = ?HASH_FUN:get_preflist_from_key(Key),
+    Preflist = hash_fun:get_preflist_from_key(Key),
     IndexNode = hd(Preflist),
-    case ?PARTITION_VNODE:read_data_item(IndexNode, Key, TxId) of
+    case partition_vnode:read_data_item(IndexNode, Key, TxId) of
     error ->
         {error, unknown};
     {error, Reason} ->
@@ -116,7 +104,7 @@ perform_singleitem_read(Key) ->
 
 %% @doc Initialize the state.
 init([From, ClientClock, Operations]) ->
-    %lager:info("Initing"),
+    %lager:info("Initiating..."),
     random:seed(now()),
     SD = #state{
             causal_clock = ClientClock,
@@ -126,7 +114,7 @@ init([From, ClientClock, Operations]) ->
             from = From,
             prepare_time=0
            },
-    {ok, execute_batch_ops, SD, 0}.
+  {ok, execute_batch_ops, SD, 0}.
 
 
 %% @doc Contact the leader computed in the prepare state for it to execute the
@@ -134,22 +122,25 @@ init([From, ClientClock, Operations]) ->
 %%       to execute the next operation.
 execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                     operations=Operations}) ->
+    %TODO?: Get the Node which has been contacted to get the clock (NodeA)
     TxId = tx_utilities:create_transaction_record(CausalClock),
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer}) ->
                     case Operation of
                         {read, Key} ->
                             {ok, Snapshot} = case dict:find(Key, Buffer) of
                                                     error ->
-                                                        Preflist = ?HASH_FUN:get_preflist_from_key(Key),
+                                                        Preflist = hash_fun:get_preflist_from_key(Key),
                                                         IndexNode = hd(Preflist),
-                                                        ?PARTITION_VNODE:read_data_item(IndexNode, Key, TxId);
+                                                        %TODO?: Get the ts from the read
+                                                        partition_vnode:read_data_item(IndexNode, Key, TxId);
+                                                        %TODO?: Contact NodeA to update its clock
                                                     {ok, SnapshotState} ->
                                                         {ok, SnapshotState}
                                                     end,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
                             {UpdatedParts, [Snapshot|RSet], Buffer1};
                         {update, Key, Op, Param} ->
-                            Preflist = ?HASH_FUN:get_preflist_from_key(Key),
+                            Preflist = hash_fun:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
                             UpdatedParts1 = case dict:is_key(IndexNode, UpdatedParts) of
                                                 false ->
@@ -171,17 +162,18 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
     {WriteSet1, ReadSet1, _} = lists:foldl(ProcessOp, {dict:new(), [], dict:new()}, Operations),
     case dict:size(WriteSet1) of
         0->
-            reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, 
-                prepare_time=partition_vnode:now_microsec()});
+            %TODO?: Change by taking the max from the ts send with the read result
+            reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1,
+                prepare_time=TxId#tx_id.snapshot_time});
         1->
             UpdatedPart = dict:to_list(WriteSet1),
-            ?PARTITION_VNODE:single_commit(UpdatedPart, TxId),
+            partition_vnode:single_commit(UpdatedPart, TxId),
             {next_state, single_committing,
-            SD#state{state=committing, num_to_ack=1, read_set=ReadSet1, tx_id=TxId}};
+                SD#state{state=committing, num_to_ack=1, read_set=ReadSet1, tx_id=TxId}};
         N->
-            ?PARTITION_VNODE:prepare(WriteSet1, TxId),
+            partition_vnode:prepare(WriteSet1, TxId),
             {next_state, receive_reply, SD#state{num_to_ack=N, state=prepared,
-                 updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
+                updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
     end.
 
 %% @doc in this state, the fsm waits for prepare_time from each updated
@@ -193,7 +185,7 @@ receive_reply({prepared, ReceivedPrepareTime},
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     case NumToAck of 
         1 ->
-            ?PARTITION_VNODE:commit(UpdatedPartitions, TxId, MaxPrepareTime),
+            partition_vnode:commit(UpdatedPartitions, TxId, MaxPrepareTime),
             reply_to_client(S0#state{state=committed, prepare_time=MaxPrepareTime});
         _ ->
             {next_state, receive_reply,
@@ -201,18 +193,18 @@ receive_reply({prepared, ReceivedPrepareTime},
     end;
 
 receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
-    ?PARTITION_VNODE:abort(UpdatedPartitions, TxId),
+    partition_vnode:abort(UpdatedPartitions, TxId),
     reply_to_client(S0#state{state=aborted});
 
 receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
-    ?PARTITION_VNODE:abort(UpdatedPartitions, TxId),
+    partition_vnode:abort(UpdatedPartitions, TxId),
     reply_to_client(S0#state{state=aborted}).
 
 single_committing({committed, CommitTime}, S0=#state{from=_From}) ->
     reply_to_client(S0#state{prepare_time=CommitTime, state=committed});
     
 single_committing(abort, S0=#state{from=_From, tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
-    ?PARTITION_VNODE:abort(UpdatedPartitions, TxId),
+    partition_vnode:abort(UpdatedPartitions, TxId),
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc when the transaction has committed or aborted,
@@ -220,8 +212,8 @@ single_committing(abort, S0=#state{from=_From, tx_id=TxId, updated_partitions=Up
 reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet, prepare_time=CommitTime}) ->
     case TxState of
         committed ->
-            From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime}},
-            {stop, normal, SD};
+          From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime}},
+          {stop, normal, SD};
         aborted ->
             From ! {error, commit_fail},
             {stop, normal, SD}

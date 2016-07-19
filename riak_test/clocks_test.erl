@@ -17,7 +17,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(clocksi_test).
+-module(clocks_test).
 
 -export([confirm/0]).
 
@@ -27,34 +27,33 @@
 confirm() ->
     [Nodes] = rt:build_clusters([3]),
     lager:info("Nodes: ~p", [Nodes]),
-    clocksi_test1(Nodes),
-    clocksi_single_key_update_read_test(Nodes),
-    clocksi_multiple_key_update_read_test(Nodes),
-    clocksi_multiple_read_update_test(Nodes),
+    clocks_test1(Nodes),
+    clocks_single_key_update_read_test(Nodes),
+    clocks_multiple_key_update_read_test(Nodes),
+    clocks_multiple_read_update_test(Nodes),
     rt:clean_cluster(Nodes),
     pass.
 
 %% @doc The following function tests that ClockSI can run a non-interactive tx
 %%      that updates multiple partitions.
-clocksi_test1(Nodes) ->
+clocks_test1(Nodes) ->
     lager:info("Test1 started"),
     FirstNode = hd(Nodes),
-    %Type = riak_dt_pncounter,
-    %% Empty transaction works,
+
     Result0=rpc:call(FirstNode, antidote, execute_tx,
                     [[]]),
     ?assertMatch({ok, _}, Result0),
+    lager:info("Empty transaction works"),
 
-
-    % A simple read returns empty
     Result11=rpc:call(FirstNode, antidote, execute_tx,
                     [
                      [{read, key1}]]),
     ?assertMatch({ok, _}, Result11),
     {ok, {_, ReadSet11, _}}=Result11,
+    lager:info("Result11 is ~w", [Result11]),
     ?assertMatch([nil], ReadSet11),
+    lager:info("A simple read returns empty works"),
 
-    %% Read what you wrote
     Result2=rpc:call(FirstNode, antidote, execute_tx,
                     [
                       [{read, key1},
@@ -64,8 +63,8 @@ clocksi_test1(Nodes) ->
     ?assertMatch({ok, _}, Result2),
     {ok, {_, ReadSet2, _}}=Result2, 
     ?assertMatch([nil,1], ReadSet2),
+    lager:info("Read what you wrote works"),
 
-    %% Update is persisted && update to multiple keys are atomic
     Result3=rpc:call(FirstNode, antidote, execute_tx,
                     [
                      [{read, key1},
@@ -73,13 +72,14 @@ clocksi_test1(Nodes) ->
     ?assertMatch({ok, _}, Result3),
     {ok, {_, ReadSet3, _}}=Result3,
     ?assertEqual([1,2], ReadSet3),
+    lager:info("Update is persisted && update to multiple keys are atomic works"),
 
-    %% Multiple updates to a key in a transaction works
     Result5=rpc:call(FirstNode, antidote, execute_tx,
                     [
                      [{update, key1, increment, 1},
                       {update, key1, increment, 1}]]),
     ?assertMatch({ok,_}, Result5),
+    lager:info("Multiple updates to a key in a transaction works"),
 
     Result6=rpc:call(FirstNode, antidote, execute_tx,
                     [
@@ -91,7 +91,7 @@ clocksi_test1(Nodes) ->
     
 %% @doc The following function tests that ClockSI can run both a single
 %%      read and a bulk-update tx.
-clocksi_single_key_update_read_test(Nodes) ->
+clocks_single_key_update_read_test(Nodes) ->
     lager:info("Test2 started"),
     FirstNode = hd(Nodes),
     Key = k3,
@@ -109,7 +109,7 @@ clocksi_single_key_update_read_test(Nodes) ->
     pass.
 
 %% @doc Verify that multiple reads/writes are successful.
-clocksi_multiple_key_update_read_test(Nodes) ->
+clocks_multiple_key_update_read_test(Nodes) ->
     lager:info("Test3 started"),
     Firstnode = hd(Nodes),
     Key1 = keym1,
@@ -135,7 +135,7 @@ clocksi_multiple_key_update_read_test(Nodes) ->
     pass.
 
 %% @doc Read an update a key multiple times.
-clocksi_multiple_read_update_test(Nodes) ->
+clocks_multiple_read_update_test(Nodes) ->
     lager:info("Test4 started"),
     Node = hd(Nodes),
     Key = get_random_key(),

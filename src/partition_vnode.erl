@@ -24,14 +24,12 @@
 -define(NUM_VERSION, 20).
 
 -export([start_vnode/1,
-	    read_data_item/3,
-	    get_cache_name/2,
+	      read_data_item/3,
+	      get_cache_name/2,
         set_prepared/4,
         update_store/6,
 
         get_and_update_ts/2,
-        update_ts/2,
-        increment_ts/2,
 
         prepare/2,
         commit/3,
@@ -44,9 +42,8 @@
         delete/1,
         open_table/2,
 
-        now_microsec/0,
-	    check_tables_ready/0,
-	    check_prepared_empty/0,
+	      check_tables_ready/0,
+	      check_prepared_empty/0,
         print_stat/0]).
 
 -export([
@@ -79,7 +76,7 @@
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 inmemory_store :: cache_id(),
-                max_ts=0 :: non_neg_integer(),
+                clock,
                 %Statistics
                 total_time :: non_neg_integer(),
                 prepare_count :: non_neg_integer(),
@@ -167,14 +164,18 @@ init([Partition]) ->
                         ok
                 end,
 
+    ClockType = antidote_config:get(clock_type),
+    Clock = clock_utilities:init_clock(ClockType),
+
     {ok, #state{partition=Partition,
                 committed_txs=CommittedTxs,
                 prepared_txs=PreparedTxs,
                 if_certify = IfCertify,
                 if_replicate = IfReplicate,
                 inmemory_store=InMemoryStore,
-                total_time = 0, 
-                prepare_count = 0, 
+                clock=Clock,
+                total_time = 0,
+                prepare_count = 0,
                 num_aborted = 0,
                 num_blocked = 0,
                 blocked_time = 0,
@@ -237,13 +238,15 @@ check_prepared_empty([{Partition,Node}|Rest]) ->
 
 open_table(Partition, Name) ->
     try
-	ets:new(get_cache_name(Partition,Name),
-		[set,protected,named_table,?TABLE_CONCURRENCY])
+	    ets:new(get_cache_name(Partition,Name),
+		    [set,protected,named_table,?TABLE_CONCURRENCY])
     catch
-	_:_Reason ->
-	    %% Someone hasn't finished cleaning up yet
-	    open_table(Partition, Name)
+	    _:_Reason ->
+	      %% Someone hasn't finished cleaning up yet
+	      open_table(Partition, Name)
     end.
+
+%TODO?: Add handle_command({update_clock, Clock})
 
 handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
     Result = case ets:info(get_cache_name(Partition,prepared)) of
@@ -256,10 +259,10 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
 
 handle_command({print_stat},_Sender,SD0=#state{partition=Partition, num_aborted=NumAborted, blocked_time=BlockedTime,
                     num_committed=NumCommitted, num_cert_fail=NumCertFail, num_blocked=NumBlocked, total_time=A6, prepare_count=A7}) ->
-    lager:info("~w: committed is ~w, aborted is ~w, num cert fail ~w, num blocked ~w, avg blocked time ~w",[Partition, 
+    lager:info("~w: committed is ~w, aborted is ~w, num cert fail ~w, num blocked ~w, avg blocked time ~w",[Partition,
             NumCommitted, NumAborted, NumCertFail, NumBlocked, BlockedTime div max(1,NumBlocked)]),
     {reply, {NumCommitted, NumAborted, NumCertFail, NumBlocked, A6, A7, BlockedTime}, SD0};
-    
+
 handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTxs}) ->
     PreparedList = ets:tab2list(PreparedTxs),
     case length(PreparedList) of
@@ -270,50 +273,51 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
             {reply, false, SD0}
     end;
 
-handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, max_ts=MaxTS,
-            prepared_txs=PreparedTxs, inmemory_store=InMemoryStore}) ->
-    MaxTS1 = update_ts(TxId#tx_id.snapshot_time, MaxTS),
+handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, clock=Clock, prepared_txs=PreparedTxs,
+                    inmemory_store=InMemoryStore}) ->
+    Clock0 = clock_utilities:get_ts_receiving_read(Clock, TxId),
     case ready_or_block(TxId, Key, PreparedTxs, Sender) of
         not_ready ->
-            %lager:info("Not ready for key ~w ~w, reader is ~w",[Key, TxId, Sender]),
-            {noreply, SD0#state{num_blocked=NumBlocked+1, max_ts=MaxTS1}};
+            {noreply, SD0#state{num_blocked=NumBlocked+1, clock=Clock0}};
         ready ->
             Result = read_value(Key, TxId, InMemoryStore),
-            {reply, Result, SD0#state{max_ts=MaxTS1}}
+            %TODO?: Send the current clock in addition of result
+            {reply, Result, SD0#state{clock=Clock0}}
     end;
 
 handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=Partition,
                               if_replicate=IfReplicate,
                               committed_txs=CommittedTxs,
-                              max_ts=MaxTS,
+                              clock=Clock,
                               if_certify=IfCertify,
                               total_time=TotalTime,
                               prepare_count=PrepareCount,
                               num_cert_fail=NumCertFail,
                               prepared_txs=PreparedTxs
                               }) ->
-    %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, MaxTS, IfCertify),
+    {Clock0, PrepareTime0} = clock_utilities:get_ts_receiving_prepare(Clock, TxId),
+    Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime0, IfCertify),
     case Result of
         {ok, PrepareTime} ->
-            UsedTime = now_microsec() - PrepareTime,
+            Clock1 = clock_utilities:update_ts_prepared_or_committed(Clock, PrepareTime),
+            UsedTime = clock_utilities:compute_used_time(PrepareTime),
             case IfReplicate of
                 true ->
-                    PendingRecord = {prepare, OriginalSender, 
+                    PendingRecord = {prepare, OriginalSender,
                             {prepared, PrepareTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
-                                            max_ts=PrepareTime}};
+                                            clock=Clock1}};
                 false ->
                     riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime}),
                     {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
-                                            max_ts=PrepareTime}} 
+                                            clock=Clock1}}
             end;
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, abort),
             %gen_fsm:send_event(OriginalSender, abort),
-            {noreply, State#state{num_cert_fail=NumCertFail+1, prepare_count=PrepareCount+1}}
+            {noreply, State#state{num_cert_fail=NumCertFail+1, prepare_count=PrepareCount+1, clock=Clock0}}
     end;
 
 handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
@@ -322,28 +326,29 @@ handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
                               if_certify=IfCertify,
                               committed_txs=CommittedTxs,
                               prepared_txs=PreparedTxs,
-                              max_ts=MaxTS,
+                              clock=Clock,
                               inmemory_store=InMemoryStore,
                               num_cert_fail=NumCertFail,
                               num_committed=NumCommitted
                               }) ->
-    %[{committed_tx, CommittedTx}] = ets:lookup(PreparedTxs, committed_tx),
-    Result = prepare_and_commit(TxId, WriteSet, CommittedTxs, PreparedTxs, InMemoryStore, MaxTS, IfCertify), 
+    {Clock0, CommitTime0} = clock_utilities:get_ts_receiving_prepare(Clock, TxId),
+    Result = prepare_and_commit(TxId, WriteSet, CommittedTxs, PreparedTxs, InMemoryStore, CommitTime0, IfCertify),
     case Result of
         {ok, {committed, CommitTime}}->
+            Clock1 = clock_utilities:update_ts_prepared_or_committed(Clock, CommitTime),
             case IfReplicate of
                 true ->
-                    PendingRecord = {commit, OriginalSender, 
+                    PendingRecord = {commit, OriginalSender,
                         {committed, CommitTime}, {TxId, WriteSet}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{num_committed=NumCommitted+1, max_ts=CommitTime}};
+                    {noreply, State#state{num_committed=NumCommitted+1, clock=Clock1}};
                 false ->
                     riak_core_vnode:reply(OriginalSender, {committed, CommitTime}),
-                    {noreply, State#state{num_committed=NumCommitted+1, max_ts=CommitTime}}
+                    {noreply, State#state{num_committed=NumCommitted+1, clock=Clock1}}
             end;
         {error, write_conflict} ->
             riak_core_vnode:reply(OriginalSender, abort),
-            {noreply, State#state{num_cert_fail=NumCertFail+1}}
+            {noreply, State#state{num_cert_fail=NumCertFail+1, clock=Clock0}}
     end;
 
 %% TODO: sending empty writeset to clocksi_downstream_generatro
@@ -362,7 +367,7 @@ handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
         {ok, committed} ->
             case IfReplicate of
                 true ->
-                    PendingRecord = {commit, Sender, 
+                    PendingRecord = {commit, Sender,
                         false, {TxId, TxCommitTime, Updates}},
                     repl_fsm:replicate(Partition, {TxId, PendingRecord}),
                     {noreply, State#state{num_committed=NumCommitted+1}};
@@ -379,17 +384,16 @@ handle_command({abort, TxId, Updates}, _Sender,
     case Updates of
         [] ->
             {reply, {error, no_tx_record}, State};
-        _ -> 
+        _ ->
             clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
             {noreply, State#state{num_aborted=NumAborted+1}}
     end;
 
 
-%%%%%%%%%%%%%%  Handle clock-related commands   %%%%%%%%%%%%%%%%%%%%%%%%
-handle_command({get_and_update_ts, CausalTS}, _Sender, #state{max_ts=TS}=State) ->
-    Now = now_microsec(),
-    Max2 = max(CausalTS, max(Now, TS)) + 1,
-    {reply, Max2, State#state{max_ts=Max2}};
+%%%%%%%%%%%%%%  Handle clock-related commands  %%%%%%%%%%%%%%%%%%%%%%%%
+handle_command({get_and_update_ts, _CausalTS}, _Sender, #state{clock=Clock}=State) ->
+    {TS, Clock1} = clock_utilities:get_and_update_ts(Clock),
+    {reply, TS, State#state{clock=Clock1}};
 
 %%%%%%%%%%% Other handling %%%%%%%%%%%%%
 handle_command(_Message, _Sender, State) ->
@@ -437,11 +441,11 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            PrepareTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
-		    set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime),
-		    {ok, PrepareTime};
-	    false ->
-	        {error, write_conflict};
+            PrepareTime = MaxTS,
+		        set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime),
+		        {ok, PrepareTime};
+	      false ->
+	          {error, write_conflict};
         wait ->
             {error, wait_more}
     end.
@@ -450,15 +454,14 @@ prepare_and_commit(TxId, TxWriteSet, CommittedTxs, PreparedTxs, InMemoryStore, M
     Keys = [Key|| {Key, _, _} <- TxWriteSet],
     case certification_check(TxId, Keys, CommittedTxs, PreparedTxs, IfCertify) of
         true ->
-            CommitTime = increment_ts(TxId#tx_id.snapshot_time, MaxTS),
+            CommitTime = MaxTS,
             update_store(TxWriteSet, TxId, CommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
             {ok, {committed, CommitTime}};
-	    false ->
-	        {error, write_conflict};
+	      false ->
+	          {error, write_conflict};
         wait ->
             {error,  wait_more}
     end.
-
 
 set_prepared(_PreparedTxs,[],_TxId,_Time) ->
     ok;
@@ -466,7 +469,7 @@ set_prepared(PreparedTxs,[Key | Rest],TxId,Time) ->
     true = ets:insert(PreparedTxs, {Key, {TxId, Time, []}}),
     set_prepared(PreparedTxs,Rest,TxId,Time).
 
-commit(TxId, TxCommitTime, Updates, CommittedTxs, 
+commit(TxId, TxCommitTime, Updates, CommittedTxs,
                                 PreparedTxs, InMemoryStore)->
     update_store(Updates, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
     {ok, committed}.
@@ -486,7 +489,7 @@ clean_abort_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore)
             true = ets:delete(PreparedTxs, Key);
         _ ->
             ok
-    end,   
+    end,
     clean_abort_prepared(PreparedTxs,Rest,TxId, InMemoryStore).
 
 %% @doc Performs a certification check when a transaction wants to move
@@ -513,7 +516,7 @@ certification_check(TxId, [Key|T], CommittedTxs, PreparedTxs, true) ->
         [] ->
             case check_prepared(TxId, PreparedTxs, Key) of
                 true ->
-                    certification_check(TxId, T, CommittedTxs, PreparedTxs, true); 
+                    certification_check(TxId, T, CommittedTxs, PreparedTxs, true);
                 false ->
                     false
             end
@@ -535,7 +538,7 @@ ready_or_block(TxId, Key, PreparedTxs, Sender) ->
         [{Key, {PreparedTxId, PrepareTime, PendingReader}}] ->
             case PrepareTime =< SnapshotTime of
                 true ->
-                    ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime, 
+                    ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime,
                         [{TxId#tx_id.snapshot_time, Sender}|PendingReader]}}),
                     not_ready;
                 false ->
@@ -592,7 +595,7 @@ read_value(Key, TxId, InMemoryStore) ->
             find_version(ValueList, MyClock)
     end.
 
-%%%%%%%%%Intenal%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%% Internal %%%%%%%%%%%%%%%
 find_version([], _SnapshotTime) ->
     {ok, nil};
 find_version([{TS, Value}|Rest], SnapshotTime) ->
@@ -602,15 +605,3 @@ find_version([{TS, Value}|Rest], SnapshotTime) ->
         false ->
             find_version(Rest, SnapshotTime)
     end.
-
-update_ts(SnapshotTS, MaxTS) ->
-    max(SnapshotTS, MaxTS).
-
-increment_ts(SnapshotTS, MaxTS) ->
-    max(SnapshotTS, MaxTS) + 1.
-
-%% @doc converts a tuple {MegaSecs,Secs,MicroSecs} into microseconds
-now_microsec() ->
-    {MegaSecs, Secs, MicroSecs} = now(),
-    (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs.
-

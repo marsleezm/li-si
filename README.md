@@ -236,7 +236,7 @@ Running Tests
 
 1. Go to antidote directory
 2. make stagedevrel
-3. ./riak\_test/bin/antidote-setup.sh (Only for the first time) 
+3. ./riak\_test/bin/antidote-setup.sh (Only for the first time)
     
 	./riak\_test/bin/antidote-current.sh
 
@@ -252,5 +252,10 @@ Running Tests
 ### Compile and run ###
 
 ./rebar skip_deps=true compile riak_test_compile
+(cd ../riak_test/ && ./riak_test -v -c li_si -t clocks_test)
 
-(cd ../riak_test/ && ./riak_test -v -c li_si -t clocksi_test)
+### Change the clock used ###
+
+Change the parameter clock_type in rel/files/antidote.config
+    physical | logical | hybrid | hybrid2
+./scripts/move_config.sh
