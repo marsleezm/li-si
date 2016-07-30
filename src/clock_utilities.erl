@@ -22,7 +22,8 @@
 
 -include("antidote.hrl").
 
--export([init_clock/1,
+-export([get_tx_id/2,
+         init_clock/1,
          get_and_update_ts/1,
          get_ts_receiving_read/2,
          get_ts_receiving_prepare/2,
@@ -32,20 +33,32 @@
 
 -record(physical_clock, {}).
 -record(logical_clock, {next_ts=0, commit_ts=0}).
--record(hybrid_clock, {max_ts={0, 0}}).
+-record(hybrid_clock, {logical_ts=0}).
 -record(hybrid2_clock, {max_ts=0}).
+
+get_tx_id(Operations, CausalClock) ->
+    case length(Operations) of
+        0 ->
+          TxId = tx_utilities:create_transaction_record(CausalClock);
+        _ ->
+          Key = element(2, hd(Operations)),
+          FirstNode = hd(hash_fun:get_preflist_from_key(Key)),
+          Ts = partition_vnode:get_and_update_ts(FirstNode, CausalClock),
+          TxId = #tx_id{snapshot_time=Ts, server_pid=self()}
+    end,
+    TxId.
 
 init_clock(ClockType) ->
     case ClockType of
-    physical ->
-        Clock0 = #physical_clock{};
-    logical ->
-        Clock0 = #logical_clock{};
-    hybrid ->
-        Clock0 = #hybrid_clock{};
-    hybrid2 ->
-        Clock0 = #hybrid2_clock{}
-    end,
+        physical ->
+            Clock0 = #physical_clock{};
+        logical ->
+            Clock0 = #logical_clock{};
+        hybrid ->
+            Clock0 = #hybrid_clock{};
+        hybrid2 ->
+            Clock0 = #hybrid2_clock{}
+        end,
     Clock0.
 
 get_and_update_ts(Clock) ->
@@ -56,9 +69,9 @@ get_and_update_ts(Clock) ->
         #logical_clock{next_ts=NextTS} ->
             TS = NextTS+1,
             Clock0 = Clock#logical_clock{next_ts=TS};
-        #hybrid_clock{max_ts=MaxTS} ->
-            TS = hybrid_timestamp_1(MaxTS),
-            Clock0 = Clock#hybrid_clock{max_ts=TS};
+        #hybrid_clock{logical_ts=LogicalTS} ->
+            TS = max(now_microsec(), LogicalTS),
+            Clock0 = Clock#hybrid_clock{logical_ts=TS};
         #hybrid2_clock{max_ts=MaxTS} ->
             TS = max(now_microsec(), MaxTS),
             Clock0 = Clock#hybrid2_clock{max_ts=TS}
@@ -71,8 +84,8 @@ get_ts_receiving_read(Clock, TxId) ->
             Clock;
         #logical_clock{next_ts=NextTS} ->
             Clock#logical_clock{next_ts=max(TxId#tx_id.snapshot_time, NextTS)};
-        #hybrid_clock{max_ts=MaxTS} ->
-            Clock#hybrid_clock{max_ts=hybrid_timestamp_2(MaxTS, TxId#tx_id.snapshot_time)};
+        #hybrid_clock{logical_ts=LogicalTS} ->
+            Clock#hybrid_clock{logical_ts=max(now_microsec(), max(LogicalTS, TxId#tx_id.snapshot_time))};
         #hybrid2_clock{max_ts=MaxTS} ->
             Clock#hybrid2_clock{max_ts=max(TxId#tx_id.snapshot_time, MaxTS)}
     end.
@@ -85,9 +98,9 @@ get_ts_receiving_prepare(Clock, TxId) ->
         #logical_clock{next_ts=NextTS} ->
             Clock0 = Clock#logical_clock{next_ts=max(TxId#tx_id.snapshot_time, NextTS)},
             PrepareTime0 = Clock0#logical_clock.next_ts+1;
-        #hybrid_clock{max_ts=MaxTS} ->
-            Clock0 = Clock#hybrid_clock{max_ts=hybrid_timestamp_2(MaxTS, TxId#tx_id.snapshot_time)},
-            PrepareTime0 = hybrid_timestamp_1(Clock0#hybrid_clock.max_ts);
+        #hybrid_clock{logical_ts=LogicalTS} ->
+            Clock0 = Clock#hybrid_clock{logical_ts=max(now_microsec(), max(LogicalTS, TxId#tx_id.snapshot_time))},
+            PrepareTime0 = Clock#hybrid_clock.logical_ts+1;
         #hybrid2_clock{max_ts=MaxTS} ->
             Clock0 = Clock#hybrid2_clock{max_ts=max(TxId#tx_id.snapshot_time, MaxTS)},
             PrepareTime0 = Clock0#hybrid2_clock.max_ts+1
@@ -101,7 +114,7 @@ update_ts_prepared_or_committed(Clock, TS) ->
       #logical_clock{} ->
           Clock#logical_clock{next_ts=TS};
       #hybrid_clock{} ->
-          Clock#hybrid_clock{max_ts=TS};
+          Clock#hybrid_clock{logical_ts=TS};
       #hybrid2_clock{} ->
           Clock#hybrid2_clock{max_ts=TS}
     end.
@@ -117,37 +130,3 @@ compute_used_time(Time) ->
 now_microsec() ->
   {MegaSecs, Secs, MicroSecs} = now(),
   (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs.
-
-%%%%%%%%%%%%%% Private function %%%%%%%%%%%%%%
-hybrid_timestamp_1(Clock) ->
-  L = element(1, Clock),
-  C = element(2, Clock),
-  L1 = max(now_microsec(), L),
-  case L1 == L of
-    true ->
-      C1 = C + 1;
-    false ->
-      C1 = 0
-  end,
-  {L1, C1}.
-
-hybrid_timestamp_2(Clock, MessageClock) ->
-  L = element(1, Clock),
-  C = element(2, Clock),
-  Lm = element(1, MessageClock),
-  Cm = element(2, MessageClock),
-  L1 = max(now_microsec(), max(L, Lm)),
-  if
-    L1 == L ->
-      if
-        L1 == Lm ->
-          C1 = max(C, Cm) + 1;
-        true ->
-          C1 = C + 1
-      end;
-    L1 == Lm ->
-      C1 = Cm + 1;
-    true ->
-      C1 = 0
-  end,
-  {L1, C1}.

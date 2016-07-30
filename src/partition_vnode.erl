@@ -246,8 +246,6 @@ open_table(Partition, Name) ->
 	      open_table(Partition, Name)
     end.
 
-%TODO?: Add handle_command({update_clock, Clock})
-
 handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
     Result = case ets:info(get_cache_name(Partition,prepared)) of
 		 undefined ->
@@ -281,7 +279,6 @@ handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, clo
             {noreply, SD0#state{num_blocked=NumBlocked+1, clock=Clock0}};
         ready ->
             Result = read_value(Key, TxId, InMemoryStore),
-            %TODO?: Send the current clock in addition of result
             {reply, Result, SD0#state{clock=Clock0}}
     end;
 

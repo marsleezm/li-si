@@ -122,8 +122,9 @@ init([From, ClientClock, Operations]) ->
 %%       to execute the next operation.
 execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                     operations=Operations}) ->
-    %TODO?: Get the Node which has been contacted to get the clock (NodeA)
-    TxId = tx_utilities:create_transaction_record(CausalClock),
+
+    TxId = clock_utilities:get_tx_id(Operations, CausalClock),
+
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer}) ->
                     case Operation of
                         {read, Key} ->
@@ -131,9 +132,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                                                     error ->
                                                         Preflist = hash_fun:get_preflist_from_key(Key),
                                                         IndexNode = hd(Preflist),
-                                                        %TODO?: Get the ts from the read
                                                         partition_vnode:read_data_item(IndexNode, Key, TxId);
-                                                        %TODO?: Contact NodeA to update its clock
                                                     {ok, SnapshotState} ->
                                                         {ok, SnapshotState}
                                                     end,
@@ -162,7 +161,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
     {WriteSet1, ReadSet1, _} = lists:foldl(ProcessOp, {dict:new(), [], dict:new()}, Operations),
     case dict:size(WriteSet1) of
         0->
-            %TODO?: Change by taking the max from the ts send with the read result
+            %TODO?: Change by taking maxReadTS
             reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1,
                 prepare_time=TxId#tx_id.snapshot_time});
         1->
