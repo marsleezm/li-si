@@ -586,10 +586,12 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemory
 read_value(Key, TxId, InMemoryStore) ->
     case ets:lookup(InMemoryStore, Key) of
         [] ->
-            {ok, nil};
+            {ok, {nil, nil}};
         [{Key, ValueList}] ->
             MyClock = TxId#tx_id.snapshot_time,
-            find_version(ValueList, MyClock)
+            {_, MaxValue} = find_max(ValueList),
+            {_, ReadValue} = find_version(ValueList, MyClock),
+            {ok, {ReadValue, MaxValue}}
     end.
 
 %%%%%%%%%%%%%%% Internal %%%%%%%%%%%%%%%
@@ -602,3 +604,9 @@ find_version([{TS, Value}|Rest], SnapshotTime) ->
         false ->
             find_version(Rest, SnapshotTime)
     end.
+
+find_max([H|T]) -> max2(T, H).
+
+max2([], Max) -> Max;
+max2([H|T], Max) when H > Max -> max2(T, H);
+max2([_|T], Max) -> max2(T, Max).

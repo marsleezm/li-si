@@ -27,6 +27,9 @@
 
 -behavior(gen_fsm).
 
+%-define(LOGGER(Text, Var), (file:write_file("/tmp/log", io_lib:fwrite("# ~s ~p~n", [Text, [Var]]), [append]))).
+-define(LOGGER(_A, _B), (skip)).
+
 -include("antidote.hrl").
 
 %% API
@@ -132,6 +135,9 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                                                     error ->
                                                         Preflist = hash_fun:get_preflist_from_key(Key),
                                                         IndexNode = hd(Preflist),
+                                                        ?LOGGER("#####", "###"),
+                                                        ?LOGGER("Key: ", Key),
+                                                        ?LOGGER("Node: ", IndexNode),
                                                         partition_vnode:read_data_item(IndexNode, Key, TxId);
                                                     {ok, SnapshotState} ->
                                                         {ok, SnapshotState}
