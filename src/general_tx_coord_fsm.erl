@@ -135,12 +135,9 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                                                     error ->
                                                         Preflist = hash_fun:get_preflist_from_key(Key),
                                                         IndexNode = hd(Preflist),
-                                                        ?LOGGER("#####", "###"),
-                                                        ?LOGGER("Key: ", Key),
-                                                        ?LOGGER("Node: ", IndexNode),
                                                         partition_vnode:read_data_item(IndexNode, Key, TxId);
                                                     {ok, SnapshotState} ->
-                                                        {ok, SnapshotState}
+                                                        {ok, {SnapshotState, SnapshotState}}
                                                     end,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
                             {UpdatedParts, [Snapshot|RSet], Buffer1};
@@ -158,8 +155,14 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                                             NewSnapshot = update_object:update(Op, Param),
                                             dict:store(Key, NewSnapshot, Buffer);
                                         {ok, Snapshot} ->
-                                            NewSnapshot = update_object:update(Snapshot, Op, Param),
-                                            dict:store(Key, NewSnapshot, Buffer)
+                                            case Snapshot of
+                                                {S1, _S2} ->
+                                                  NewSnapshot = update_object:update(S1, Op, Param),
+                                                  dict:store(Key, {NewSnapshot, NewSnapshot}, Buffer);
+                                                S1 ->
+                                                  NewSnapshot = update_object:update(S1, Op, Param),
+                                                  dict:store(Key, NewSnapshot, Buffer)
+                                              end
                                         end,
                             {UpdatedParts1, RSet, Buffer1}
                     end
