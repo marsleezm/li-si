@@ -45,9 +45,7 @@
          terminate/3]).
 
 %% States
--export([
-         receive_reply/2,
-         single_committing/2,
+-export([receive_reply/2,
          execute_batch_ops/2,
          perform_singleitem_read/1,
          reply_to_client/1]).
@@ -65,6 +63,9 @@
 %%    state: state of the transaction: {active|prepared|committing|committed}
 %%----------------------------------------------------------------------
 -record(state, {
+      wait :: non_neg_integer(),
+      wait_prepare :: non_neg_integer(),
+      missed :: list(),
 	  from :: {pid(), term()},
 	  tx_id :: txid(),
     operations :: [],
@@ -115,7 +116,10 @@ init([From, ClientClock, Operations]) ->
             updated_partitions = dict:new(),
             read_set = [],
             from = From,
-            prepare_time=0
+            prepare_time=0,
+            wait=0,
+            missed=[],
+            wait_prepare=0
            },
   {ok, execute_batch_ops, SD, 0}.
 
@@ -127,20 +131,24 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                     operations=Operations}) ->
 
     TxId = clock_utilities:get_tx_id(Operations, CausalClock),
-
-    ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer}) ->
+    ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0}) ->
                     case Operation of
                         {read, Key} ->
-                            {ok, Snapshot} = case dict:find(Key, Buffer) of
-                                                    error ->
-                                                        Preflist = hash_fun:get_preflist_from_key(Key),
-                                                        IndexNode = hd(Preflist),
-                                                        partition_vnode:read_data_item(IndexNode, Key, TxId);
-                                                    {ok, SnapshotState} ->
-                                                        {ok, {SnapshotState, SnapshotState}}
-                                                    end,
+                            case dict:find(Key, Buffer) of
+                                error ->
+                                    Preflist = hash_fun:get_preflist_from_key(Key),
+                                    IndexNode = hd(Preflist),
+                                    {ok, Snapshot} = partition_vnode:read_data_item(IndexNode, Key, TxId),
+                                    {_Value, MissedVersions, WaitRead} = Snapshot,
+                                    Missed1 = [MissedVersions|Missed0],
+                                    Wait1 = Wait0 + WaitRead; 
+                                {ok, Snapshot} ->
+                                    {_Value, MissedVersions, _Wait} = Snapshot,
+                                    Missed1 = [MissedVersions|Missed0],
+                                    Wait1 = Wait0 
+                            end,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
-                            {UpdatedParts, [Snapshot|RSet], Buffer1};
+                            {UpdatedParts, [Snapshot|RSet], Buffer1, Wait1, Missed1};
                         {update, Key, Op, Param} ->
                             Preflist = hash_fun:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
@@ -153,51 +161,41 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                             Buffer1 = case dict:find(Key, Buffer) of
                                         error ->
                                             NewSnapshot = update_object:update(Op, Param),
-                                            dict:store(Key, NewSnapshot, Buffer);
-                                        {ok, Snapshot} ->
-                                            case Snapshot of
-                                                {S1, _S2} ->
-                                                  NewSnapshot = update_object:update(S1, Op, Param),
-                                                  dict:store(Key, {NewSnapshot, NewSnapshot}, Buffer);
-                                                S1 ->
-                                                  NewSnapshot = update_object:update(S1, Op, Param),
-                                                  dict:store(Key, NewSnapshot, Buffer)
-                                              end
+                                            dict:store(Key, {NewSnapshot, 0, 0}, Buffer);
+                                        {ok, {S1, _, _}} ->
+                                            NewSnapshot = update_object:update(S1, Op, Param),
+                                            dict:store(Key, {NewSnapshot, 0, 0}, Buffer)
                                         end,
-                            {UpdatedParts1, RSet, Buffer1}
+                            {UpdatedParts1, RSet, Buffer1, Wait0, Missed0}
                     end
                 end,
-    {WriteSet1, ReadSet1, _} = lists:foldl(ProcessOp, {dict:new(), [], dict:new()}, Operations),
+    {WriteSet1, ReadSet1, _, WaitRead, FinalMissed} = lists:foldl(ProcessOp, {dict:new(), [], dict:new(), 0, []}, Operations),
     case dict:size(WriteSet1) of
         0->
             %TODO?: Change by taking maxReadTS
-            reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1,
+            reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, wait=WaitRead, missed=FinalMissed,
                 prepare_time=TxId#tx_id.snapshot_time});
-        1->
-            UpdatedPart = dict:to_list(WriteSet1),
-            partition_vnode:single_commit(UpdatedPart, TxId),
-            {next_state, single_committing,
-                SD#state{state=committing, num_to_ack=1, read_set=ReadSet1, tx_id=TxId}};
         N->
             partition_vnode:prepare(WriteSet1, TxId),
-            {next_state, receive_reply, SD#state{num_to_ack=N, state=prepared,
+            {next_state, receive_reply, SD#state{num_to_ack=N, state=prepared, wait=WaitRead, missed=FinalMissed,
                 updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
     end.
 
 %% @doc in this state, the fsm waits for prepare_time from each updated
 %%      partitions in order to compute the final tx timestamp (the maximum
 %%      of the received prepare_time).
-receive_reply({prepared, ReceivedPrepareTime},
+receive_reply({prepared, ReceivedPrepareTime, Wait},
                  S0=#state{num_to_ack=NumToAck, tx_id=TxId, updated_partitions=UpdatedPartitions,
-                            prepare_time=PrepareTime}) ->
+                            prepare_time=PrepareTime, wait_prepare=WaitPrepare0}) ->
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
+    WaitPrepare1 = max(WaitPrepare0, Wait),
     case NumToAck of 
         1 ->
             partition_vnode:commit(UpdatedPartitions, TxId, MaxPrepareTime),
-            reply_to_client(S0#state{state=committed, prepare_time=MaxPrepareTime});
+            reply_to_client(S0#state{state=committed, prepare_time=MaxPrepareTime, wait_prepare=WaitPrepare1});
         _ ->
             {next_state, receive_reply,
-             S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime}}
+             S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime, wait_prepare=WaitPrepare1}}
     end;
 
 receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
@@ -208,19 +206,12 @@ receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartition
     partition_vnode:abort(UpdatedPartitions, TxId),
     reply_to_client(S0#state{state=aborted}).
 
-single_committing({committed, CommitTime}, S0=#state{from=_From}) ->
-    reply_to_client(S0#state{prepare_time=CommitTime, state=committed});
-    
-single_committing(abort, S0=#state{from=_From, tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
-    partition_vnode:abort(UpdatedPartitions, TxId),
-    reply_to_client(S0#state{state=aborted}).
-
 %% @doc when the transaction has committed or aborted,
 %%       a reply is sent to the client that started the tx_id.
-reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet, prepare_time=CommitTime}) ->
+reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet, prepare_time=CommitTime, wait=Wait, wait_prepare=WaitPrepare, missed=Missed}) ->
     case TxState of
         committed ->
-          From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime}},
+          From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime, Wait+WaitPrepare, Missed}},
           {stop, normal, SD};
         aborted ->
             From ! {error, commit_fail},

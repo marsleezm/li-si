@@ -28,12 +28,9 @@
 	      get_cache_name/2,
         set_prepared/4,
         update_store/6,
-
-        get_and_update_ts/2,
-
+        get_snapshot_time/2,
         prepare/2,
         commit/3,
-        single_commit/2,
         abort/2,
         init/1,
         terminate/2,
@@ -41,10 +38,8 @@
         is_empty/1,
         delete/1,
         open_table/2,
-
-	      check_tables_ready/0,
-	      check_prepared_empty/0,
-        print_stat/0]).
+	    check_tables_ready/0,
+	    check_prepared_empty/0]).
 
 -export([
          handle_handoff_command/3,
@@ -76,15 +71,7 @@
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 inmemory_store :: cache_id(),
-                clock,
-                %Statistics
-                total_time :: non_neg_integer(),
-                prepare_count :: non_neg_integer(),
-                num_aborted :: non_neg_integer(),
-                num_blocked :: non_neg_integer(),
-                num_cert_fail :: non_neg_integer(),
-                blocked_time :: non_neg_integer(),
-                num_committed :: non_neg_integer()}).
+                clock}).
 
 %%%===================================================================
 %%% API
@@ -109,16 +96,6 @@ prepare(ListofNodes, TxId) ->
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
 
-%% @doc Sends prepare+commit to a single partition
-%%      Called by a Tx coordinator when the tx only
-%%      affects one partition
-single_commit([{Node,WriteSet}], TxId) ->
-    Self = {fsm, undefined, self()},
-    riak_core_vnode_master:command(Node,
-                                   {single_commit, TxId,WriteSet, Self},
-                                   Self,
-                                   ?CLOCKSI_MASTER).
-
 %% @doc Sends a commit request to a Node involved in a tx identified by TxId
 commit(ListofNodes, TxId, CommitTime) ->
     dict:fold(fun(Node,WriteSet,_Acc) ->
@@ -137,9 +114,9 @@ abort(ListofNodes, TxId) ->
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
 
-get_and_update_ts(Node, CausalClock) ->
+get_snapshot_time(Node, CausalClock) ->
     riak_core_vnode_master:sync_command(Node,
-                            {get_and_update_ts, CausalClock},
+                            {get_snapshot_time, CausalClock},
                             ?CLOCKSI_MASTER, infinity).
 
 get_cache_name(Partition,Base) ->
@@ -155,32 +132,16 @@ init([Partition]) ->
     InMemoryStore = open_table(Partition, inmemory_store),
 
     IfCertify = antidote_config:get(do_cert),
-    IfReplicate = antidote_config:get(do_repl),
-
-    _ = case IfReplicate of
-                    true ->
-                        repl_fsm_sup:start_fsm(Partition);
-                    false ->
-                        ok
-                end,
 
     ClockType = antidote_config:get(clock_type),
-    Clock = clock_utilities:init_clock(ClockType),
+    {ok, Clock} = clock_utilities:init_clock(ClockType),
 
     {ok, #state{partition=Partition,
                 committed_txs=CommittedTxs,
                 prepared_txs=PreparedTxs,
                 if_certify = IfCertify,
-                if_replicate = IfReplicate,
                 inmemory_store=InMemoryStore,
-                clock=Clock,
-                total_time = 0,
-                prepare_count = 0,
-                num_aborted = 0,
-                num_blocked = 0,
-                blocked_time = 0,
-                num_cert_fail = 0,
-                num_committed = 0}}.
+                clock=Clock}}.
 
 check_tables_ready() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
@@ -200,21 +161,6 @@ check_table_ready([{Partition,Node}|Rest]) ->
 	false ->
 	    false
     end.
-
-print_stat() ->
-    {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
-    PartitionList = chashbin:to_list(CHBin),
-    print_stat(PartitionList, {0,0,0,0,0,0,0}).
-
-print_stat([], {CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc, CntAcc, BlockedTime}) ->
-    lager:info("Total number committed is ~w, total number aborted is ~w, cer fail is ~w, num blocked is ~w,Avg time is ~w, Avg blocked time is ~w", [CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc div max(1,CntAcc), BlockedTime div max(1,BlockedAcc)]),
-    {CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc, CntAcc, BlockedTime};
-print_stat([{Partition,Node}|Rest], {CommitAcc, AbortAcc, CertFailAcc, BlockedAcc, TimeAcc, CntAcc, BlockedTime}) ->
-    {Commit, Abort, Cert, BlockedA, TimeA, CntA, BlockedTimeA} = riak_core_vnode_master:sync_command({Partition,Node},
-						 {print_stat},
-						 ?CLOCKSI_MASTER,
-						 infinity),
-	print_stat(Rest, {CommitAcc+Commit, AbortAcc+Abort, CertFailAcc+Cert, BlockedAcc+BlockedA, TimeAcc+TimeA, CntAcc+CntA, BlockedTimeA+BlockedTime}).
 
 check_prepared_empty() ->
     {ok, CHBin} = riak_core_ring_manager:get_chash_bin(),
@@ -255,12 +201,6 @@ handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
 	     end,
     {reply, Result, SD0};
 
-handle_command({print_stat},_Sender,SD0=#state{partition=Partition, num_aborted=NumAborted, blocked_time=BlockedTime,
-                    num_committed=NumCommitted, num_cert_fail=NumCertFail, num_blocked=NumBlocked, total_time=A6, prepare_count=A7}) ->
-    lager:info("~w: committed is ~w, aborted is ~w, num cert fail ~w, num blocked ~w, avg blocked time ~w",[Partition,
-            NumCommitted, NumAborted, NumCertFail, NumBlocked, BlockedTime div max(1,NumBlocked)]),
-    {reply, {NumCommitted, NumAborted, NumCertFail, NumBlocked, A6, A7, BlockedTime}, SD0};
-
 handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTxs}) ->
     PreparedList = ets:tab2list(PreparedTxs),
     case length(PreparedList) of
@@ -271,126 +211,112 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
             {reply, false, SD0}
     end;
 
-handle_command({read, Key, TxId}, Sender, SD0=#state{num_blocked=NumBlocked, clock=Clock, prepared_txs=PreparedTxs,
+handle_command({pending_read, Key, TxId, Sender, Wait}, _from, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
                     inmemory_store=InMemoryStore}) ->
-    Clock0 = clock_utilities:get_ts_receiving_read(Clock, TxId),
-    case ready_or_block(TxId, Key, PreparedTxs, Sender) of
+    {ok, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
+    case ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) of
         not_ready ->
-            {noreply, SD0#state{num_blocked=NumBlocked+1, clock=Clock0}};
+            {noreply, SD0#state{clock=Clock0}};
         ready ->
-            Result = read_value(Key, TxId, InMemoryStore),
-            {reply, Result, SD0#state{clock=Clock0}}
+            {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
+            {reply, {ok, {Value, Missed, Wait}}, SD0#state{clock=Clock0}}
+    end;
+
+handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
+                    inmemory_store=InMemoryStore}) ->
+    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    case Wait > 0 of
+        true ->
+            riak_core_vnode:send_command_after(round(Wait), {pending_read, TxId, Key, Sender, Wait}),
+            {noreply, SD0#state{clock=Clock0}};
+        false ->
+            case ready_or_block(TxId, Key, PreparedTxs, Sender, 0) of
+                not_ready ->
+                    {noreply, SD0#state{clock=Clock0}};
+                ready ->
+                    {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
+                    {reply, {ok, {Value, Missed, 0}}, SD0#state{clock=Clock0}}
+            end
+    end;
+
+handle_command({pending_prepare, TxId, WriteSet, OriginalSender, Wait}, _Sender,
+               State = #state{partition=_Partition,
+                              committed_txs=CommittedTxs,
+                              clock=Clock,
+                              if_certify=IfCertify,
+                              prepared_txs=PreparedTxs
+                              }) ->
+    {ok, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
+    {ok, PrepareTime, Clock1} = clock_utilities:get_prepare_time(Clock0),
+    Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
+        case Result of
+            ok ->
+                riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, Wait}),
+                {noreply, State#state{clock=Clock1}};
+            {error, write_conflict} ->
+                riak_core_vnode:reply(OriginalSender, abort),
+                %gen_fsm:send_event(OriginalSender, abort),
+                {noreply, State#state{clock=Clock1}}
     end;
 
 handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
-               State = #state{partition=Partition,
-                              if_replicate=IfReplicate,
+               State = #state{partition=_Partition,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
-                              total_time=TotalTime,
-                              prepare_count=PrepareCount,
-                              num_cert_fail=NumCertFail,
                               prepared_txs=PreparedTxs
                               }) ->
-    {Clock0, PrepareTime0} = clock_utilities:get_ts_receiving_prepare(Clock, TxId),
-    Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime0, IfCertify),
-    case Result of
-        {ok, PrepareTime} ->
-            Clock1 = clock_utilities:update_ts_prepared_or_committed(Clock, PrepareTime),
-            UsedTime = clock_utilities:compute_used_time(PrepareTime),
-            case IfReplicate of
-                true ->
-                    PendingRecord = {prepare, OriginalSender,
-                            {prepared, PrepareTime}, {TxId, WriteSet}},
-                    repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
-                                            clock=Clock1}};
-                false ->
-                    riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime}),
-                    {noreply, State#state{total_time=TotalTime+UsedTime, prepare_count=PrepareCount+1,
-                                            clock=Clock1}}
-            end;
-        {error, write_conflict} ->
-            riak_core_vnode:reply(OriginalSender, abort),
-            %gen_fsm:send_event(OriginalSender, abort),
-            {noreply, State#state{num_cert_fail=NumCertFail+1, prepare_count=PrepareCount+1, clock=Clock0}}
-    end;
-
-handle_command({single_commit, TxId, WriteSet, OriginalSender}, _Sender,
-               State = #state{partition=Partition,
-                              if_replicate=IfReplicate,
-                              if_certify=IfCertify,
-                              committed_txs=CommittedTxs,
-                              prepared_txs=PreparedTxs,
-                              clock=Clock,
-                              inmemory_store=InMemoryStore,
-                              num_cert_fail=NumCertFail,
-                              num_committed=NumCommitted
-                              }) ->
-    {Clock0, CommitTime0} = clock_utilities:get_ts_receiving_prepare(Clock, TxId),
-    Result = prepare_and_commit(TxId, WriteSet, CommittedTxs, PreparedTxs, InMemoryStore, CommitTime0, IfCertify),
-    case Result of
-        {ok, {committed, CommitTime}}->
-            Clock1 = clock_utilities:update_ts_prepared_or_committed(Clock, CommitTime),
-            case IfReplicate of
-                true ->
-                    PendingRecord = {commit, OriginalSender,
-                        {committed, CommitTime}, {TxId, WriteSet}},
-                    repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{num_committed=NumCommitted+1, clock=Clock1}};
-                false ->
-                    riak_core_vnode:reply(OriginalSender, {committed, CommitTime}),
-                    {noreply, State#state{num_committed=NumCommitted+1, clock=Clock1}}
-            end;
-        {error, write_conflict} ->
-            riak_core_vnode:reply(OriginalSender, abort),
-            {noreply, State#state{num_cert_fail=NumCertFail+1, clock=Clock0}}
+    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    case Wait > 0 of
+        true ->
+            riak_core_vnode:send_command_after(round(Wait), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
+            {noreply, State#state{clock=Clock0}};
+        false ->
+            {ok, PrepareTime, Clock1} = clock_utilities:get_prepare_time(Clock0),
+            Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
+            case Result of
+                ok ->
+                    riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, 0}),
+                    {noreply, State#state{clock=Clock1}};
+                {error, write_conflict} ->
+                    riak_core_vnode:reply(OriginalSender, abort),
+                    %gen_fsm:send_event(OriginalSender, abort),
+                    {noreply, State#state{clock=Clock1}}
+            end
     end;
 
 %% TODO: sending empty writeset to clocksi_downstream_generatro
 %% Just a workaround, need to delete downstream_generator_vnode
 %% eventually.
-handle_command({commit, TxId, TxCommitTime, Updates}, Sender,
-               #state{partition=Partition,
+handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
+               #state{partition=_Partition,
                       committed_txs=CommittedTxs,
-                      if_replicate=IfReplicate,
                       prepared_txs=PreparedTxs,
-                      inmemory_store=InMemoryStore,
-                      num_committed=NumCommitted
+                      inmemory_store=InMemoryStore
                       } = State) ->
     Result = commit(TxId, TxCommitTime, Updates, CommittedTxs, PreparedTxs, InMemoryStore),
     case Result of
         {ok, committed} ->
-            case IfReplicate of
-                true ->
-                    PendingRecord = {commit, Sender,
-                        false, {TxId, TxCommitTime, Updates}},
-                    repl_fsm:replicate(Partition, {TxId, PendingRecord}),
-                    {noreply, State#state{num_committed=NumCommitted+1}};
-                false ->
-                    {noreply, State#state{num_committed=NumCommitted+1}}
-            end;
+            {noreply, State};
         {error, no_updates} ->
             {reply, no_tx_record, State}
     end;
 
 handle_command({abort, TxId, Updates}, _Sender,
-               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore,
-                    num_aborted=NumAborted} = State) ->
+               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore} = State) ->
     case Updates of
         [] ->
             {reply, {error, no_tx_record}, State};
         _ ->
             clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
-            {noreply, State#state{num_aborted=NumAborted+1}}
+            {noreply, State}
     end;
 
 
 %%%%%%%%%%%%%%  Handle clock-related commands  %%%%%%%%%%%%%%%%%%%%%%%%
-handle_command({get_and_update_ts, _CausalTS}, _Sender, #state{clock=Clock}=State) ->
-    {TS, Clock1} = clock_utilities:get_and_update_ts(Clock),
-    {reply, TS, State#state{clock=Clock1}};
+handle_command({get_snapshot_time, _CausalTS}, _Sender, #state{clock=Clock}=State) ->
+    {ok, SnapshotTime, Clock1} = clock_utilities:get_snapshot_time(Clock),
+    {reply, SnapshotTime, State#state{clock=Clock1}};
 
 %%%%%%%%%%% Other handling %%%%%%%%%%%%%
 handle_command(_Message, _Sender, State) ->
@@ -435,29 +361,15 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
-prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, MaxTS, IfCertify)->
+prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, PrepareTime, IfCertify)->
     case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
         true ->
-            PrepareTime = MaxTS,
-		        set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime),
-		        {ok, PrepareTime};
-	      false ->
-	          {error, write_conflict};
+		    set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime),
+		    ok;
+	    false ->
+	        {error, write_conflict};
         wait ->
             {error, wait_more}
-    end.
-
-prepare_and_commit(TxId, TxWriteSet, CommittedTxs, PreparedTxs, InMemoryStore, MaxTS, IfCertify)->
-    Keys = [Key|| {Key, _, _} <- TxWriteSet],
-    case certification_check(TxId, Keys, CommittedTxs, PreparedTxs, IfCertify) of
-        true ->
-            CommitTime = MaxTS,
-            update_store(TxWriteSet, TxId, CommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
-            {ok, {committed, CommitTime}};
-	      false ->
-	          {error, write_conflict};
-        wait ->
-            {error,  wait_more}
     end.
 
 set_prepared(_PreparedTxs,[],_TxId,_Time) ->
@@ -479,9 +391,9 @@ clean_abort_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore)
             case ets:lookup(InMemoryStore, Key) of
                 [{Key, ValueList}] ->
                     {_, Value} = hd(ValueList),
-                    lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok,Value}) end, PendingReaders);
+                    lists:foreach(fun({_SnapshotTime, Sender, Wait}) -> riak_core_vnode:reply(Sender, {ok, {Value, 0, Wait}}) end, PendingReaders);
                 [] ->
-                    lists:foreach(fun(Sender) -> riak_core_vnode:reply(Sender, {ok,nil}) end, PendingReaders)
+                    lists:foreach(fun({_SnapshotTime, Sender, Wait}) -> riak_core_vnode:reply(Sender, {ok, {nil, 0, Wait}}) end, PendingReaders)
             end,
             true = ets:delete(PreparedTxs, Key);
         _ ->
@@ -527,7 +439,7 @@ check_prepared(_TxId, PreparedTxs, Key) ->
             false
     end.
 
-ready_or_block(TxId, Key, PreparedTxs, Sender) ->
+ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     case ets:lookup(PreparedTxs, Key) of
         [] ->
@@ -536,7 +448,7 @@ ready_or_block(TxId, Key, PreparedTxs, Sender) ->
             case PrepareTime =< SnapshotTime of
                 true ->
                     ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime,
-                        [{TxId#tx_id.snapshot_time, Sender}|PendingReader]}}),
+                        [{TxId#tx_id.snapshot_time, Sender, Wait}|PendingReader]}}),
                     not_ready;
                 false ->
                     ready
@@ -564,12 +476,12 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemory
             end,
     case ets:lookup(PreparedTxs, Key) of
         [{Key, {TxId, _Time, PendingReaders}}] ->
-            lists:foreach(fun({SnapshotTime, Sender}) ->
+            lists:foreach(fun({SnapshotTime, Sender, Wait}) ->
                     case SnapshotTime >= TxCommitTime of
                         true ->
-                            riak_core_vnode:reply(Sender, {ok, lists:nth(2, Values)});
+                            riak_core_vnode:reply(Sender, {ok, {lists:nth(2, Values), 1, Wait}});
                         false ->
-                            riak_core_vnode:reply(Sender, {ok, hd(Values)})
+                            riak_core_vnode:reply(Sender, {ok, {hd(Values), 0, Wait}})
                     end end,
                 PendingReaders),
             true = ets:delete(PreparedTxs, Key);
@@ -586,27 +498,20 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemory
 read_value(Key, TxId, InMemoryStore) ->
     case ets:lookup(InMemoryStore, Key) of
         [] ->
-            {ok, {nil, nil}};
+            {ok, {nil, 0}};
         [{Key, ValueList}] ->
             MyClock = TxId#tx_id.snapshot_time,
-            {_, MaxValue} = find_max(ValueList),
-            {_, ReadValue} = find_version(ValueList, MyClock),
-            {ok, {ReadValue, MaxValue}}
+            {_, ReadValue, Missed} = find_version(ValueList, MyClock, 0),
+            {ok, {ReadValue, Missed}}
     end.
 
 %%%%%%%%%%%%%%% Internal %%%%%%%%%%%%%%%
-find_version([], _SnapshotTime) ->
-    {ok, nil};
-find_version([{TS, Value}|Rest], SnapshotTime) ->
+find_version([], _SnapshotTime, Missed) ->
+    {ok, nil, Missed};
+find_version([{TS, Value}|Rest], SnapshotTime, Missed) ->
     case SnapshotTime >= TS of
         true ->
-            {ok, Value};
+            {ok, Value, Missed};
         false ->
-            find_version(Rest, SnapshotTime)
+            find_version(Rest, SnapshotTime, Missed+1)
     end.
-
-find_max([H|T]) -> max2(T, H).
-
-max2([], Max) -> Max;
-max2([H|T], Max) when H > Max -> max2(T, H);
-max2([_|T], Max) -> max2(T, Max).

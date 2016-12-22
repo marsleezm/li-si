@@ -39,6 +39,7 @@ update(remove, _Param)->
     [].
 
 update(Object, increment, Param)->
+    lager:info("Object: ~p, and Param ~p", [Object, Param]),
     case Object of
         nil -> update(increment, Param);
         _ -> Object+Param
