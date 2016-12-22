@@ -30,7 +30,8 @@
          get_my_previous/2,
          remove_node_from_preflist/1,
          get_my_node/1,
-         get_local_nodes/0
+         get_local_nodes/0,
+         get_partitions/0
         ]).
 
 %% @doc get_preflist_from_key returns a preference list where a given
