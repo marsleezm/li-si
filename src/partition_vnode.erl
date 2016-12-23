@@ -222,7 +222,7 @@ handle_command({pending_read, TxId, Key, Sender, Wait}, _from, SD0=#state{clock=
             {reply, {ok, {Value, Missed, Wait}}, SD0#state{clock=Clock0}}
     end;
 
-handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=_PreparedTxs,
+handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
                     inmemory_store=InMemoryStore}) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
     case Wait > 0 of
@@ -230,15 +230,13 @@ handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=_
             riak_core_vnode:send_command_after(round(Wait), {pending_read, TxId, Key, Sender, Wait}),
             {noreply, SD0#state{clock=Clock0}};
         false ->
-            {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-            {reply, {ok, {Value, Missed, 0}}, SD0#state{clock=Clock0}}
-            %case ready_or_block(TxId, Key, PreparedTxs, Sender, 0) of
-            %    not_ready ->
-            %        {noreply, SD0#state{clock=Clock0}};
-            %    ready ->
-            %        {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-            %        {reply, {ok, {Value, Missed, 0}}, SD0#state{clock=Clock0}}
-            %end
+            case ready_or_block(TxId, Key, PreparedTxs, Sender, 0) of
+                not_ready ->
+                    {noreply, SD0#state{clock=Clock0}};
+                ready ->
+                    {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
+                    {reply, {ok, {Value, Missed, 0}}, SD0#state{clock=Clock0}}
+            end
     end;
 
 handle_command({pending_prepare, TxId, WriteSet, OriginalSender, Wait}, _Sender,
