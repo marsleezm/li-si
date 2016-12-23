@@ -211,7 +211,7 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
             {reply, false, SD0}
     end;
 
-handle_command({pending_read, Key, TxId, Sender, Wait}, _from, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
+handle_command({pending_read, TxId, Key, Sender, Wait}, _from, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
                     inmemory_store=InMemoryStore}) ->
     {ok, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
     case ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) of
