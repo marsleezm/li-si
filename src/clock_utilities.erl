@@ -24,17 +24,17 @@
 
 -export([get_tx_id/2,
          init_clock/1,
-         get_and_update_ts/1,
-         get_ts_receiving_read/2,
-         get_ts_receiving_prepare/2,
-         update_ts_prepared_or_committed/2,
-         compute_used_time/1,
-         now_microsec/0]).
+         get_snapshot_time/1,
+         catch_up/2,
+         force_catch_up/2,
+         get_prepare_time/1, 
+         now_microsec/0,
+         now_microsec_new/1]).
 
--record(physical_clock, {}).
--record(logical_clock, {next_ts=0, commit_ts=0}).
--record(hybrid_clock, {logical_ts=0}).
--record(hybrid2_clock, {max_ts=0}).
+-record(physical, {last}).
+-record(logical, {last}).
+-record(hybrid, {physical, logical}).
+-record(bravo, {physical, logical}).
 
 get_tx_id(Operations, CausalClock) ->
     case length(Operations) of
@@ -43,7 +43,7 @@ get_tx_id(Operations, CausalClock) ->
         _ ->
           Key = element(2, hd(Operations)),
           FirstNode = hd(hash_fun:get_preflist_from_key(Key)),
-          Ts = partition_vnode:get_and_update_ts(FirstNode, CausalClock),
+          Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
           TxId = #tx_id{snapshot_time=Ts, server_pid=self()}
     end,
     TxId.
@@ -51,82 +51,71 @@ get_tx_id(Operations, CausalClock) ->
 init_clock(ClockType) ->
     case ClockType of
         physical ->
-            Clock0 = #physical_clock{};
+            {ok, #physical{last=0}};
         logical ->
-            Clock0 = #logical_clock{};
+            {ok, #logical{last=0}};
         hybrid ->
-            Clock0 = #hybrid_clock{};
-        hybrid2 ->
-            Clock0 = #hybrid2_clock{}
-        end,
-    Clock0.
-
-get_and_update_ts(Clock) ->
-    case Clock of
-        #physical_clock{} ->
-            TS = now_microsec(),
-            Clock0 = Clock;
-        #logical_clock{next_ts=NextTS} ->
-            TS = NextTS+1,
-            Clock0 = Clock#logical_clock{next_ts=TS};
-        #hybrid_clock{logical_ts=LogicalTS} ->
-            TS = max(now_microsec(), LogicalTS),
-            Clock0 = Clock#hybrid_clock{logical_ts=TS};
-        #hybrid2_clock{max_ts=MaxTS} ->
-            TS = max(now_microsec(), MaxTS),
-            Clock0 = Clock#hybrid2_clock{max_ts=TS}
-    end,
-    {TS, Clock0}.
-
-get_ts_receiving_read(Clock, TxId) ->
-    case Clock of
-        #physical_clock{} ->
-            Clock;
-        #logical_clock{next_ts=NextTS} ->
-            Clock#logical_clock{next_ts=max(TxId#tx_id.snapshot_time, NextTS)};
-        #hybrid_clock{logical_ts=LogicalTS} ->
-            Clock#hybrid_clock{logical_ts=max(now_microsec(), max(LogicalTS, TxId#tx_id.snapshot_time))};
-        #hybrid2_clock{max_ts=MaxTS} ->
-            Clock#hybrid2_clock{max_ts=max(TxId#tx_id.snapshot_time, MaxTS)}
+            {ok, #hybrid{physical=0, logical=0}};
+        bravo ->
+            {ok, #bravo{physical=0, logical=0}}
     end.
 
-get_ts_receiving_prepare(Clock, TxId) ->
+get_snapshot_time(Clock) ->
     case Clock of
-        #physical_clock{} ->
-            Clock0=Clock,
-            PrepareTime0 = now_microsec();
-        #logical_clock{next_ts=NextTS} ->
-            Clock0 = Clock#logical_clock{next_ts=max(TxId#tx_id.snapshot_time, NextTS)},
-            PrepareTime0 = Clock0#logical_clock.next_ts+1;
-        #hybrid_clock{logical_ts=LogicalTS} ->
-            Clock0 = Clock#hybrid_clock{logical_ts=max(now_microsec(), max(LogicalTS, TxId#tx_id.snapshot_time))},
-            PrepareTime0 = Clock#hybrid_clock.logical_ts+1;
-        #hybrid2_clock{max_ts=MaxTS} ->
-            Clock0 = Clock#hybrid2_clock{max_ts=max(TxId#tx_id.snapshot_time, MaxTS)},
-            PrepareTime0 = Clock0#hybrid2_clock.max_ts+1
-    end,
-    {Clock0, PrepareTime0}.
-
-update_ts_prepared_or_committed(Clock, TS) ->
-    case Clock of
-      #physical_clock{} ->
-          Clock;
-      #logical_clock{} ->
-          Clock#logical_clock{next_ts=TS};
-      #hybrid_clock{} ->
-          Clock#hybrid_clock{logical_ts=TS};
-      #hybrid2_clock{} ->
-          Clock#hybrid2_clock{max_ts=TS}
+        #physical{last=Last} ->
+            Now = now_microsec_new(Last),
+            {ok, Now, Clock#physical{last=Now}};
+        #logical{last=Last} ->
+            {ok, Last, Clock};
+        #hybrid{physical=Physical0, logical=Logical} ->
+            Physical1 = now_microsec_new(Physical0),
+            {ok, max(Physical1, Logical), Clock#hybrid{physical=Physical1}};
+        #bravo{physical=Physical0, logical=Logical} ->
+            Physical1 = now_microsec_new(Physical0),
+            {ok, max(Physical1, Logical), Clock#bravo{physical=Physical1}}
     end.
 
-compute_used_time(Time) ->
-    case Time of
-      {T, _} ->
-        now_microsec() - T;
-      T ->
-        now_microsec() - T
-      end.
+catch_up(Clock, SnapshotTime) ->
+    case Clock of
+        #physical{last=Last} ->
+            Now = now_microsec_new(Last), 
+            {ok, SnapshotTime - Now, Clock#physical{last=Now}};
+        #logical{last=Last} ->
+            {ok, 0, Clock#logical{last=max(Last, SnapshotTime)}};
+        #hybrid{physical=_Physical0, logical=Logical} ->
+            {ok, 0, Clock#hybrid{logical=max(Logical, SnapshotTime)}};
+        #bravo{physical=_Physical0, logical=Logical} ->
+            {ok, 0, Clock#bravo{logical=max(Logical, SnapshotTime)}}
+    end.
+
+force_catch_up(Clock, SnapshotTime) ->
+    case Clock of
+        #physical{last=Last} ->
+            {ok, Clock#physical{last=max(Last, SnapshotTime)}};
+        _ ->
+            {error, weird_clock}
+    end.
+
+get_prepare_time(Clock) ->
+    case Clock of
+        #physical{last=Last} ->
+            Now = now_microsec_new(Last),
+            {ok, Now, Clock#physical{last=Now}};
+        #logical{last=Last} ->
+            {ok, Last+1, Clock#logical{last=Last+1}};
+        #hybrid{physical=Physical0, logical=Logical} ->
+            Physical1 = now_microsec_new(Physical0),
+            PrepareTime = max(Physical1, Logical+1),
+            {ok, PrepareTime, Clock#hybrid{physical=Physical1}};
+        #bravo{physical=_Physical0, logical=Logical} ->
+            {ok, Logical + 1, Clock}
+    end.
 
 now_microsec() ->
   {MegaSecs, Secs, MicroSecs} = now(),
   (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs.
+
+now_microsec_new(Last) ->
+  {MegaSecs, Secs, MicroSecs} = os:timestamp(),
+  Now = (MegaSecs * 1000000 + Secs) * 1000000 + MicroSecs,
+  max(Last+1, Now).
