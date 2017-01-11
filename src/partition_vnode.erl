@@ -269,13 +269,13 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               if_certify=IfCertify,
                               prepared_txs=PreparedTxs
                               }) ->
-    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
-    case round(Wait/1000) > 0 of
-        true ->
-	    lager:info("Send after: ~p", [round(Wait/1000)]),
-            riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
-            {noreply, State#state{clock=Clock0}};
-        false ->
+    {ok, _Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    %case round(Wait/1000) > 0 of
+    %    true ->
+%	    lager:info("Send after: ~p", [round(Wait/1000)]),
+ %           riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
+  %          {noreply, State#state{clock=Clock0}};
+   %     false ->
 	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
             {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
             Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
@@ -287,7 +287,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                     riak_core_vnode:reply(OriginalSender, abort),
                     %gen_fsm:send_event(OriginalSender, abort),
                     {noreply, State#state{clock=Clock2}}
-            end
+    %        end
     end;
 
 %% TODO: sending empty writeset to clocksi_downstream_generatro

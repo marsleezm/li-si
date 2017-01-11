@@ -187,12 +187,6 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
 receive_reply({prepared, ReceivedPrepareTime, Wait},
                  S0=#state{num_to_ack=NumToAck, tx_id=TxId, updated_partitions=UpdatedPartitions,
                             prepare_time=PrepareTime, wait_prepare=WaitPrepare0}) ->
-    case Wait > 0 of
-	true ->
-		lager:info("Received prepared from pending prepare");
-	false ->
-		noop
-    end,
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     WaitPrepare1 = max(WaitPrepare0, Wait),
     case NumToAck of 
