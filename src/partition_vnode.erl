@@ -271,6 +271,7 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
     case Wait > 0 of
         true ->
+	    lager:info("Send after: ~p", round(Wait/1000)),
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
             {noreply, State#state{clock=Clock0}};
         false ->
