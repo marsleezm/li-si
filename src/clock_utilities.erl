@@ -93,7 +93,7 @@ force_catch_up(Clock, SnapshotTime) ->
         #physical{last=Last} ->
             {ok, Clock#physical{last=max(Last, SnapshotTime)}};
         _ ->
-            {error, weird_clock}
+	    {ok, Clock}
     end.
 
 get_prepare_time(Clock) ->
