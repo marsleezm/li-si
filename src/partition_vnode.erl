@@ -269,22 +269,23 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                               prepared_txs=PreparedTxs
                               }) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
-    case Wait > 0 of
+    case round(Wait/1000) > 0 of
         true ->
 	    lager:info("Send after: ~p", [round(Wait/1000)]),
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
             {noreply, State#state{clock=Clock0}};
         false ->
-            {ok, PrepareTime, Clock1} = clock_utilities:get_prepare_time(Clock0),
+	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
+            {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
             Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
             case Result of
                 ok ->
                     riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, 0}),
-                    {noreply, State#state{clock=Clock1}};
+                    {noreply, State#state{clock=Clock2}};
                 {error, write_conflict} ->
                     riak_core_vnode:reply(OriginalSender, abort),
                     %gen_fsm:send_event(OriginalSender, abort),
-                    {noreply, State#state{clock=Clock1}}
+                    {noreply, State#state{clock=Clock2}}
             end
     end;
 
