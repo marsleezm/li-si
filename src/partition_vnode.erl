@@ -252,43 +252,43 @@ handle_command({pending_prepare, TxId, WriteSet, OriginalSender, Wait}, _Sender,
     {ok, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
     {ok, PrepareTime, Clock1} = clock_utilities:get_prepare_time(Clock0),
     Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
-        case Result of
-            ok ->
-                riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, Wait}),
-                {noreply, State#state{clock=Clock1}};
-            {error, write_conflict} ->
-                riak_core_vnode:reply(OriginalSender, abort),
-                %gen_fsm:send_event(OriginalSender, abort),
-                {noreply, State#state{clock=Clock1}}
+    case Result of
+        ok ->
+       	    riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, Wait}),
+            {noreply, State#state{clock=Clock1}};
+        {error, write_conflict} ->
+            riak_core_vnode:reply(OriginalSender, abort),
+            %gen_fsm:send_event(OriginalSender, abort),
+            {noreply, State#state{clock=Clock1}}
     end;
 
 handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
                State = #state{partition=_Partition,
-                              committed_txs=CommittedTxs,
+                              committed_txs=_CommittedTxs,
                               clock=Clock,
-                              if_certify=IfCertify,
-                              prepared_txs=PreparedTxs
+                              if_certify=_IfCertify,
+                              prepared_txs=_PreparedTxs
                               }) ->
-    {ok, _Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
     %case round(Wait/1000) > 0 of
     %    true ->
-%	    lager:info("Send after: ~p", [round(Wait/1000)]),
- %           riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
-  %          {noreply, State#state{clock=Clock0}};
-   %     false ->
-	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
-            {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
-            Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
-            case Result of
-                ok ->
-                    riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, 0}),
-                    {noreply, State#state{clock=Clock2}};
-                {error, write_conflict} ->
-                    riak_core_vnode:reply(OriginalSender, abort),
+            %riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
+            riak_core_vnode:send_command_after(0, {pending_prepare, TxId, WriteSet, OriginalSender, Wait}),
+            {noreply, State#state{clock=Clock0}};
+    %    false ->
+    %	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
+    %        {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
+    %        Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
+    %        case Result of
+    %            ok ->
+    %                riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, 0}),
+    %                {noreply, State#state{clock=Clock2}};
+    %            {error, write_conflict} ->
+    %                riak_core_vnode:reply(OriginalSender, abort),
                     %gen_fsm:send_event(OriginalSender, abort),
-                    {noreply, State#state{clock=Clock2}}
+    %                {noreply, State#state{clock=Clock2}}
     %        end
-    end;
+    %end;
 
 %% TODO: sending empty writeset to clocksi_downstream_generatro
 %% Just a workaround, need to delete downstream_generator_vnode
