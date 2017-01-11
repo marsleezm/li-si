@@ -79,8 +79,7 @@ catch_up(Clock, SnapshotTime) ->
     case Clock of
         #physical{last=Last} ->
             Now = now_microsec_new(Last), 
-            %{ok, SnapshotTime - Now, Clock#physical{last=Now}};
-            {ok, 0, Clock#physical{last=Now}};
+            {ok, SnapshotTime - Now, Clock#physical{last=Now}};
         #logical{last=Last} ->
             {ok, 0, Clock#logical{last=max(Last, SnapshotTime)}};
         #hybrid{physical=_Physical0, logical=Logical} ->
