@@ -223,24 +223,25 @@ handle_command({pending_read, TxId, Key, Sender, Wait}, _From, SD0=#state{clock=
             {noreply, SD0#state{clock=Clock0}}
     end;
 
-handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
-                    inmemory_store=InMemoryStore}) ->
+handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=_PreparedTxs,
+                    inmemory_store=_InMemoryStore}) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
-    case round(Wait/1000) > 0 of
-        true ->
-            riak_core_vnode:send_command_after(round(Wait/1000), {pending_read, TxId, Key, Sender, Wait}),
+    %case round(Wait/1000) > 0 of
+    %    true ->
+            %riak_core_vnode:send_command_after(round(Wait/1000), {pending_read, TxId, Key, Sender, Wait}),
+            riak_core_vnode:send_command_after(1, {pending_read, TxId, Key, Sender, Wait}),
             {noreply, SD0#state{clock=Clock0}};
-        false ->
-	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
-            case ready_or_block(TxId, Key, PreparedTxs, Sender, 0) of
-                not_ready ->
-                    {noreply, SD0#state{clock=Clock1}};
-                ready ->
-                    {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-                    riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}}),
-                    {noreply, SD0#state{clock=Clock1}}
-            end
-    end;
+    %    false ->
+%	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
+%            case ready_or_block(TxId, Key, PreparedTxs, Sender, 0) of
+%                not_ready ->
+%                    {noreply, SD0#state{clock=Clock1}};
+%                ready ->
+%                    {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
+%                    riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}}),
+%                    {noreply, SD0#state{clock=Clock1}}
+%            end
+    %end;
 
 handle_command({pending_prepare, TxId, WriteSet, OriginalSender, Wait}, _Sender,
                State = #state{partition=_Partition,
@@ -267,17 +268,6 @@ handle_command({prepare, TxId, WriteSet, OriginalSender}, _Sender,
     %    false ->
    	    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, OriginalSender, Clock0, 0),
     	    {noreply, State#state{clock=Clock1}};
-    	    %{ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
-            %{ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
-            %Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
-            %case Result of
-            %    ok ->
-            %        riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, 0}),
-            %        {noreply, State#state{clock=Clock2}};
-            %    {error, write_conflict} ->
-            %        riak_core_vnode:reply(OriginalSender, abort),
-            %        {noreply, State#state{clock=Clock2}}
-            %end
     %end;
 
 %% TODO: sending empty writeset to clocksi_downstream_generatro
