@@ -68,6 +68,7 @@
 -record(state, {partition :: non_neg_integer(),
                 prepared_txs :: cache_id(),
                 committed_txs :: cache_id(),
+                pending_prepare :: cache_id(),
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
                 inmemory_store :: cache_id(),
@@ -129,6 +130,7 @@ init([Partition]) ->
     CommittedTxs = open_table(Partition, committed),
     %%true = ets:insert(PreparedTxs, {committed_tx, dict:new()}),
     InMemoryStore = open_table(Partition, inmemory_store),
+    PendingPrepare = open_table(Partition, pending_prepare),
 
     IfCertify = antidote_config:get(do_cert),
 
@@ -140,6 +142,7 @@ init([Partition]) ->
                 prepared_txs=PreparedTxs,
                 if_certify = IfCertify,
                 inmemory_store=InMemoryStore,
+		pending_prepare=PendingPrepare,
                 clock=Clock}}.
 
 check_tables_ready() ->
@@ -246,21 +249,30 @@ handle_command({pending_prepare, TxId, WriteSet, Sender, Wait}, _From,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
-                              prepared_txs=PreparedTxs
+                              prepared_txs=PreparedTxs,
+			      pending_prepare=PendingPrepare
                               }) ->
-    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait),
-    {noreply, State#state{clock=Clock1}};
+    case ets:lookup(PendingPrepare, TxId) of
+    	[{TxId, pending}] ->
+            ets:delete(PendingPrepare, TxId),
+    	    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait),
+    	    {noreply, State#state{clock=Clock1}};
+        [] ->
+    	    {noreply, State}
+    end;
 
 handle_command({prepare, TxId, WriteSet}, Sender,
                State = #state{partition=_Partition,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
-                              prepared_txs=PreparedTxs
+                              prepared_txs=PreparedTxs,
+			      pending_prepare=PendingPrepare
                               }) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
     case round(Wait/1000) > 0 of
         true ->
+	    true = ets:insert(PendingPrepare, {TxId, pending}),
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, Sender, Wait}),
             {noreply, State#state{clock=Clock0}};
         false ->
@@ -286,11 +298,17 @@ handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
     end;
 
 handle_command({abort, TxId, Updates}, _Sender,
-               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore} = State) ->
+               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare} = State) ->
     case Updates of
         [] ->
             {reply, {error, no_tx_record}, State};
         _ ->
+	    case ets:lookup(PendingPrepare, TxId) of
+        	[{TxId, pending}] ->
+		    ets:delete(PendingPrepare, TxId);
+                [] ->
+		    noop
+            end,
             clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
             {noreply, State}
     end;
@@ -499,15 +517,15 @@ find_version([{TS, Value}|Rest], SnapshotTime, Missed) ->
             find_version(Rest, SnapshotTime, Missed+1)
     end.
 
-prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, OriginalSender, Clock, Wait) ->
+prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait) ->
     {ok, Clock1} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
     {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
     Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
     case Result of
     	ok ->
-            riak_core_vnode:reply(OriginalSender, {prepared, PrepareTime, Wait});
+            riak_core_vnode:reply(Sender, {prepared, PrepareTime, Wait});
         {error, write_conflict} ->
-            riak_core_vnode:reply(OriginalSender, abort)
+            riak_core_vnode:reply(Sender, abort)
     end,
     Clock2.
 
