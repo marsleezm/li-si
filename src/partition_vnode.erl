@@ -88,11 +88,10 @@ read_data_item(Node, Key, TxId) ->
 
 %% @doc Sends a prepare request to a Node involved in a tx identified by TxId
 prepare(ListofNodes, TxId) ->
-    Self = {fsm, undefined, self()},
     dict:fold(fun(Node, WriteSet, _Acc) ->
 			riak_core_vnode_master:command(Node,
-						       {prepare, TxId, [Key||{Key, _, _} <- WriteSet], Self},
-                               Self,
+						       {prepare, TxId, [Key||{Key, _, _} <- WriteSet]},
+    						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
 
@@ -242,17 +241,17 @@ handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=P
             end
     end;
 
-handle_command({pending_prepare, TxId, WriteSet, OriginalSender, Wait}, _Sender,
+handle_command({pending_prepare, TxId, WriteSet, Sender, Wait}, _From,
                State = #state{partition=_Partition,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
                               prepared_txs=PreparedTxs
                               }) ->
-    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, OriginalSender, Clock, Wait),
+    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait),
     {noreply, State#state{clock=Clock1}};
 
-handle_command({prepare, TxId, WriteSet, _OriginalSender}, Sender,
+handle_command({prepare, TxId, WriteSet}, Sender,
                State = #state{partition=_Partition,
                               committed_txs=CommittedTxs,
                               clock=Clock,
