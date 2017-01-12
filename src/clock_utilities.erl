@@ -26,6 +26,7 @@
          init_clock/1,
          get_snapshot_time/1,
          catch_up/2,
+         catch_up_if_aggr/2,
          force_catch_up/2,
          get_prepare_time/1, 
          now_microsec/0,
@@ -33,20 +34,20 @@
 
 -record(physical, {last}).
 -record(logical, {last}).
+-record(aggr_logical, {last}).
 -record(hybrid, {physical, logical}).
 -record(bravo, {physical, logical}).
 
 get_tx_id(Operations, CausalClock) ->
     case length(Operations) of
         0 ->
-          TxId = tx_utilities:create_transaction_record(CausalClock);
+          tx_utilities:create_transaction_record(CausalClock);
         _ ->
           Key = element(2, hd(Operations)),
           FirstNode = hd(hash_fun:get_preflist_from_key(Key)),
           Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
-          TxId = #tx_id{snapshot_time=Ts, server_pid=self()}
-    end,
-    TxId.
+          #tx_id{snapshot_time=Ts, server_pid=self()}
+    end.
 
 init_clock(ClockType) ->
     case ClockType of
@@ -54,6 +55,8 @@ init_clock(ClockType) ->
             {ok, #physical{last=0}};
         logical ->
             {ok, #logical{last=0}};
+        aggr_logical ->
+            {ok, #aggr_logical{last=0}};
         hybrid ->
             {ok, #hybrid{physical=0, logical=0}};
         bravo ->
@@ -66,6 +69,8 @@ get_snapshot_time(Clock) ->
             Now = now_microsec_new(Last),
             {ok, Now, Clock#physical{last=Now}};
         #logical{last=Last} ->
+            {ok, Last, Clock};
+        #aggr_logical{last=Last} ->
             {ok, Last, Clock};
         #hybrid{physical=Physical0, logical=Logical} ->
             Physical1 = now_microsec_new(Physical0),
@@ -82,6 +87,8 @@ catch_up(Clock, SnapshotTime) ->
             {ok, SnapshotTime - Now, Clock#physical{last=Now}};
         #logical{last=Last} ->
             {ok, 0, Clock#logical{last=max(Last, SnapshotTime)}};
+        #aggr_logical{last=Last} ->
+            {ok, 0, Clock#aggr_logical{last=max(Last, SnapshotTime)}};
         #hybrid{physical=_Physical0, logical=Logical} ->
             {ok, 0, Clock#hybrid{logical=max(Logical, SnapshotTime)}};
         #bravo{physical=_Physical0, logical=Logical} ->
@@ -96,6 +103,14 @@ force_catch_up(Clock, SnapshotTime) ->
 	    {ok, Clock}
     end.
 
+catch_up_if_aggr(MyClock, IncomingClock) ->
+    case MyClock of
+        #aggr_logical{last=Last} ->
+            {ok, MyClock#aggr_logical{last=max(Last, IncomingClock)}};
+        _ ->
+	    {ok, MyClock}
+    end.
+
 get_prepare_time(Clock) ->
     case Clock of
         #physical{last=Last} ->
@@ -103,6 +118,8 @@ get_prepare_time(Clock) ->
             {ok, Now, Clock#physical{last=Now}};
         #logical{last=Last} ->
             {ok, Last+1, Clock#logical{last=Last+1}};
+        #aggr_logical{last=Last} ->
+            {ok, Last+1, Clock#aggr_logical{last=Last+1}};
         #hybrid{physical=Physical0, logical=Logical} ->
             Physical1 = now_microsec_new(Physical0),
             PrepareTime = max(Physical1, Logical+1),

@@ -31,7 +31,7 @@
         get_snapshot_time/2,
         prepare/2,
         commit/3,
-        abort/2,
+        abort/3,
         init/1,
         terminate/2,
         handle_command/3,
@@ -106,10 +106,10 @@ commit(ListofNodes, TxId, CommitTime) ->
 		end, ok, ListofNodes).
 
 %% @doc Sends a commit request to a Node involved in a tx identified by TxId
-abort(ListofNodes, TxId) ->
+abort(ListofNodes, TxId, MaxClock) ->
     dict:fold(fun(Node,WriteSet,_Acc) ->
 			riak_core_vnode_master:command(Node,
-						       {abort, TxId, WriteSet},
+						       {abort, TxId, WriteSet, MaxClock},
 						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
@@ -297,11 +297,13 @@ handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
             {reply, no_tx_record, State}
     end;
 
-handle_command({abort, TxId, Updates}, _Sender,
-               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare} = State) ->
+handle_command({abort, TxId, Updates, MaxClock}, _Sender,
+               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare, clock=MyClock} = State) ->
+    {ok, MyClock1} = clock_utilities:catch_up_if_aggr(MyClock, MaxClock),
+    %lager:warning("Prev clock is ~w, max clock is ~w, new clock is ~w", [MyClock, MaxClock, MyClock1]),
     case Updates of
         [] ->
-            {reply, {error, no_tx_record}, State};
+            {reply, {error, no_tx_record}, State#state{clock=MyClock1}};
         _ ->
 	    case ets:lookup(PendingPrepare, TxId) of
         	[{TxId, pending}] ->
@@ -310,7 +312,7 @@ handle_command({abort, TxId, Updates}, _Sender,
 		    noop
             end,
             clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
-            {noreply, State}
+            {noreply, State#state{clock=MyClock1}}
     end;
 
 

@@ -198,12 +198,12 @@ receive_reply({prepared, ReceivedPrepareTime, Wait},
              S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime, wait_prepare=WaitPrepare1}}
     end;
 
-receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
-    partition_vnode:abort(UpdatedPartitions, TxId),
+receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, prepare_time=MaxPrepareTime}) ->
+    partition_vnode:abort(UpdatedPartitions, TxId, MaxPrepareTime),
     reply_to_client(S0#state{state=aborted});
 
-receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions}) ->
-    partition_vnode:abort(UpdatedPartitions, TxId),
+receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, prepare_time=MaxPrepareTime}) ->
+    partition_vnode:abort(UpdatedPartitions, TxId, MaxPrepareTime),
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc when the transaction has committed or aborted,
