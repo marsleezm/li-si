@@ -22,7 +22,7 @@
 
 -include("antidote.hrl").
 
--export([get_tx_id/2,
+-export([get_tx_id/3,
          init_clock/1,
          get_snapshot_time/1,
          catch_up/2,
@@ -38,16 +38,27 @@
 -record(hybrid, {physical, logical}).
 -record(bravo, {physical, logical}).
 
-get_tx_id(Operations, CausalClock) ->
-    case length(Operations) of
-        0 ->
-          tx_utilities:create_transaction_record(CausalClock);
-        _ ->
-          Key = element(2, hd(Operations)),
-          FirstNode = hd(hash_fun:get_preflist_from_key(Key)),
-          Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
-          #tx_id{snapshot_time=Ts, server_pid=self()}
-    end.
+get_tx_id(_Operations, ignore, CausalClock) ->
+    Partitions = hash_fun:get_partitions(),
+    Len = length(Partitions),
+    FirstNode = lists:nth(random:uniform(Len), Partitions),
+    Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
+    %lager:warning("StartPartId ignore, geting ~w from ~w", [Ts, FirstNode]),
+    #tx_id{snapshot_time=Ts, server_pid=self()};
+    %case length(Operations) of
+    %    0 ->
+    %      tx_utilities:create_transaction_record(CausalClock);
+    %    _ ->
+    %      Key = element(2, hd(Operations)),
+    %      FirstNode = hd(hash_fun:get_preflist_from_key(Key)),
+    %      Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
+    %      #tx_id{snapshot_time=Ts, server_pid=self()}
+    %end;
+get_tx_id(_Operations, StartPartId, CausalClock) ->
+    FirstNode = hd(hash_fun:get_preflist_from_key(StartPartId)),
+    Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
+    %lager:warning("StartPartId ~w, geting ~w from ~w", [StartPartId, Ts, FirstNode]),
+    #tx_id{snapshot_time=Ts, server_pid=self()}.
 
 init_clock(ClockType) ->
     case ClockType of

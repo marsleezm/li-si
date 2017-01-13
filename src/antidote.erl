@@ -24,7 +24,7 @@
 -export([update/3,
          read/1,
          execute_tx/2,
-         execute_tx/1]).
+         execute_tx/3]).
 
 %% Public API
 
@@ -33,7 +33,7 @@
 -spec update(Key::key(), Type::type(), {term(),term()}) -> {ok, term()} | {error, reason()}.
 update(Key, Op, Param) ->
     Operations = [{update, Key, Op, Param}],
-    case execute_tx(Operations) of
+    case execute_tx(ignore, Operations) of
         {ok, Result} ->
             {ok, Result};
         {error, Reason} ->
@@ -57,18 +57,18 @@ read(Key) ->
 %%      the transaction, in case the tx ends successfully.
 %%      error message in case of a failure.
 %%
--spec execute_tx(Clock :: snapshot_time(),
+-spec execute_tx(Clock :: snapshot_time(), StartPartId :: non_neg_integer(),
                          Operations::[any()]) -> term().
-execute_tx(Clock, Operations) ->
-    {ok, _} = general_tx_coord_sup:start_fsm([self(), Clock, Operations]),
+execute_tx(Clock, StartPartId, Operations) ->
+    {ok, _} = general_tx_coord_sup:start_fsm([self(), Clock, StartPartId, Operations]),
     receive
         EndOfTx ->
             EndOfTx
     end.
 
--spec execute_tx(Operations::[any()]) -> term().
-execute_tx(Operations) ->
-    {ok, _} = general_tx_coord_sup:start_fsm([self(), Operations]),
+-spec execute_tx(StartPartId::non_neg_integer(), Operations::[any()]) -> term().
+execute_tx(StartPartId, Operations) ->
+    {ok, _} = general_tx_coord_sup:start_fsm([self(), StartPartId, Operations]),
     receive
         EndOfTx ->
             EndOfTx

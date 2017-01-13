@@ -33,7 +33,7 @@
 -include("antidote.hrl").
 
 %% API
--export([start_link/3, start_link/2]).
+-export([start_link/4, start_link/3]).
 
 %% Callbacks
 -export([init/1,
@@ -68,6 +68,7 @@
       missed :: list(),
 	  from :: {pid(), term()},
 	  tx_id :: txid(),
+      start_part_id :: integer(),
     operations :: [],
 	  num_to_ack :: non_neg_integer(),
 	  prepare_time :: non_neg_integer(),
@@ -80,11 +81,11 @@
 %%% API
 %%%===================================================================
 
-start_link(From, Clientclock, Operations) ->
-    gen_fsm:start_link(?MODULE, [From, Clientclock, Operations], []).
+start_link(From, Clientclock, StartPartId, Operations) ->
+    gen_fsm:start_link(?MODULE, [From, Clientclock, StartPartId, Operations], []).
 
-start_link(From, Operations) ->
-    gen_fsm:start_link(?MODULE, [From, 0, Operations], []).
+start_link(From, StartPartId, Operations) ->
+    gen_fsm:start_link(?MODULE, [From, 0, StartPartId, Operations], []).
 
 stop(Pid) -> gen_fsm:sync_send_all_state_event(Pid,stop).
 
@@ -107,11 +108,12 @@ perform_singleitem_read(Key) ->
     end.
 
 %% @doc Initialize the state.
-init([From, ClientClock, Operations]) ->
+init([From, ClientClock, StartPartId, Operations]) ->
     %lager:info("Initiating..."),
     random:seed(now()),
     SD = #state{
             causal_clock = ClientClock,
+            start_part_id = StartPartId,
             operations = Operations,
             updated_partitions = dict:new(),
             read_set = [],
@@ -128,9 +130,8 @@ init([From, ClientClock, Operations]) ->
 %%      operation, wait for it to finish (synchronous) and go to the prepareOP
 %%       to execute the next operation.
 execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
-                    operations=Operations}) ->
-
-    TxId = clock_utilities:get_tx_id(Operations, CausalClock),
+                    start_part_id=StartPartId, operations=Operations}) ->
+    TxId = clock_utilities:get_tx_id(Operations, StartPartId, CausalClock),
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0}) ->
                     case Operation of
                         {read, Key} ->
