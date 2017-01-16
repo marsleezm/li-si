@@ -211,7 +211,7 @@ receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartition
 %% @doc when the transaction has committed or aborted,
 %%       a reply is sent to the client that started the tx_id.
 reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet, prepare_time=CommitTime, wait=Wait, wait_prepare=WaitPrepare, missed=Missed}) ->
-    lager:warning("Reply to client for ~w", [TxId]),
+    lager:warning("Reply to client for ~w, txstate is ~w", [TxId, TxState]),
     case TxState of
         committed ->
           From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime, Wait+WaitPrepare, Missed}},

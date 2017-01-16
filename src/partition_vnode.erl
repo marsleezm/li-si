@@ -322,7 +322,6 @@ handle_command({abort, TxId, Updates, MaxClock}, _Sender,
 %%%%%%%%%%%%%%  Handle clock-related commands  %%%%%%%%%%%%%%%%%%%%%%%%
 handle_command({get_snapshot_time, _CausalTS}, _Sender, #state{clock=Clock}=State) ->
     {ok, SnapshotTime, Clock1} = clock_utilities:get_snapshot_time(Clock),
-    lager:warning("My clock is ~w, SnapshotTime is ~w, Clock1 is ~w", [Clock, SnapshotTime, Clock1]),
     {reply, SnapshotTime, State#state{clock=Clock1}};
 
 %%%%%%%%%%% Other handling %%%%%%%%%%%%%
@@ -420,6 +419,7 @@ certification_check(TxId, [Key|T], CommittedTxs, PreparedTxs, true) ->
         [{Key, CommitTime}] ->
             case CommitTime > SnapshotTime of
                 true ->
+                    lager:warning("Certification for key ~w, abort, ct ~w, st ~t", [Key, CommitTime, SnapshotTime]),
                     false;
                 false ->
                     case check_prepared(TxId, PreparedTxs, Key) of
@@ -442,7 +442,8 @@ check_prepared(_TxId, PreparedTxs, Key) ->
     case ets:lookup(PreparedTxs, Key) of
         [] ->
             true;
-        _ ->
+        R ->
+            lager:warning("Certification for key ~w, ~w is here!", [Key, R]),
             false
     end.
 
