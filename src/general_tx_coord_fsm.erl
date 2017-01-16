@@ -132,7 +132,6 @@ init([From, ClientClock, StartPartId, Operations]) ->
 execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                     start_part_id=StartPartId, operations=Operations}) ->
     TxId = clock_utilities:get_tx_id(Operations, StartPartId, CausalClock),
-    lager:warning("TxId is ~w", [TxId]),
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0}) ->
                     case Operation of
                         {read, Key} ->
@@ -178,6 +177,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
             reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, wait=WaitRead, missed=FinalMissed,
                 prepare_time=TxId#tx_id.snapshot_time});
         N->
+            lager:warning("TxId is ~w, waiting for ~w replies, writeset is ~w", [TxId, N, WriteSet1]),
             partition_vnode:prepare(WriteSet1, TxId),
             {next_state, receive_reply, SD#state{num_to_ack=N, state=prepared, wait=WaitRead, missed=FinalMissed,
                 updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
