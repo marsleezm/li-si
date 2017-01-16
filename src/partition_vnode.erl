@@ -322,6 +322,7 @@ handle_command({abort, TxId, Updates, MaxClock}, _Sender,
 %%%%%%%%%%%%%%  Handle clock-related commands  %%%%%%%%%%%%%%%%%%%%%%%%
 handle_command({get_snapshot_time, _CausalTS}, _Sender, #state{clock=Clock}=State) ->
     {ok, SnapshotTime, Clock1} = clock_utilities:get_snapshot_time(Clock),
+    lager:warning("My clock is ~w, SnapshotTime is ~w, Clock1 is ~w", [Clock, SnapshotTime, Clock1]),
     {reply, SnapshotTime, State#state{clock=Clock1}};
 
 %%%%%%%%%%% Other handling %%%%%%%%%%%%%
