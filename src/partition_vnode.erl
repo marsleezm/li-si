@@ -142,7 +142,7 @@ init([Partition]) ->
                 prepared_txs=PreparedTxs,
                 if_certify = IfCertify,
                 inmemory_store=InMemoryStore,
-		pending_prepare=PendingPrepare,
+		        pending_prepare=PendingPrepare,
                 clock=Clock}}.
 
 check_tables_ready() ->
@@ -270,7 +270,7 @@ handle_command({prepare, TxId, WriteSet}, Sender,
 			      pending_prepare=PendingPrepare
                               }) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
-    lager:warning("~w prepare, waiting is ~w", [Wait]),
+    lager:warning("~w prepare, waiting is ~w", [TxId, Wait]),
     case round(Wait/1000) > 0 of
         true ->
 	    true = ets:insert(PendingPrepare, {TxId, pending}),
@@ -301,11 +301,11 @@ handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
 
 handle_command({abort, TxId, Updates, MaxClock}, _Sender,
                #state{partition=Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare, clock=MyClock} = State) ->
-    lager:warning("~w geting aborted in ~w", [Partition]),
+    lager:warning("~w geting aborted in ~w", [TxId, Partition]),
     {ok, MyClock1} = clock_utilities:catch_up_if_aggr(MyClock, MaxClock),
     case Updates of
         [] ->
-            lager:warning("~w no tx record"),
+            lager:warning("~w no tx record", [TxId]),
             {reply, {error, no_tx_record}, State#state{clock=MyClock1}};
         _ ->
 	    case ets:lookup(PendingPrepare, TxId) of

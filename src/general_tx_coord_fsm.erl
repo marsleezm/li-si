@@ -132,6 +132,7 @@ init([From, ClientClock, StartPartId, Operations]) ->
 execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                     start_part_id=StartPartId, operations=Operations}) ->
     TxId = clock_utilities:get_tx_id(Operations, StartPartId, CausalClock),
+    lager:warning("TxId is ~w", [TxId]),
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0}) ->
                     case Operation of
                         {read, Key} ->
