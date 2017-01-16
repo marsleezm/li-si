@@ -270,13 +270,14 @@ handle_command({prepare, TxId, WriteSet}, Sender,
 			      pending_prepare=PendingPrepare
                               }) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    lager:warning("~w prepare, waiting is ~w", [Wait]),
     case round(Wait/1000) > 0 of
         true ->
 	    true = ets:insert(PendingPrepare, {TxId, pending}),
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, Sender, Wait}),
             {noreply, State#state{clock=Clock0}};
         false ->
-   	    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock0, 0),
+   	        Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock0, 0),
     	    {noreply, State#state{clock=Clock1}}
     end;
 
@@ -289,6 +290,7 @@ handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
                       prepared_txs=PreparedTxs,
                       inmemory_store=InMemoryStore
                       } = State) ->
+    lager:warning("~w committed in ~w", [TxId, _Partition]),
     Result = commit(TxId, TxCommitTime, Updates, CommittedTxs, PreparedTxs, InMemoryStore),
     case Result of
         {ok, committed} ->
@@ -298,11 +300,12 @@ handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
     end;
 
 handle_command({abort, TxId, Updates, MaxClock}, _Sender,
-               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare, clock=MyClock} = State) ->
+               #state{partition=Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare, clock=MyClock} = State) ->
+    lager:warning("~w geting aborted in ~w", [Partition]),
     {ok, MyClock1} = clock_utilities:catch_up_if_aggr(MyClock, MaxClock),
-    %lager:warning("Prev clock is ~w, max clock is ~w, new clock is ~w", [MyClock, MaxClock, MyClock1]),
     case Updates of
         [] ->
+            lager:warning("~w no tx record"),
             {reply, {error, no_tx_record}, State#state{clock=MyClock1}};
         _ ->
 	    case ets:lookup(PendingPrepare, TxId) of
@@ -525,8 +528,10 @@ prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Cloc
     Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
     case Result of
     	ok ->
+            lager:warning("~w passed prepare", [TxId]),
             riak_core_vnode:reply(Sender, {prepared, PrepareTime, Wait});
         {error, write_conflict} ->
+            lager:warning("~w failed prepare", [TxId]),
             riak_core_vnode:reply(Sender, abort)
     end,
     Clock2.
