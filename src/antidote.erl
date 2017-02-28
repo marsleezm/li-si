@@ -60,6 +60,7 @@ read(Key) ->
 -spec execute_tx(Clock :: snapshot_time(), StartPartId :: non_neg_integer(),
                          Operations::[any()]) -> term().
 execute_tx(Clock, StartPartId, Operations) ->
+    %lager:warning("Received op, start id is ~w", [StartPartId]),
     {ok, _} = general_tx_coord_sup:start_fsm([self(), Clock, StartPartId, Operations]),
     receive
         EndOfTx ->
@@ -68,6 +69,7 @@ execute_tx(Clock, StartPartId, Operations) ->
 
 -spec execute_tx(StartPartId::non_neg_integer(), Operations::[any()]) -> term().
 execute_tx(StartPartId, Operations) ->
+    %lager:warning("Received op, start id is ~w", [StartPartId]),
     {ok, _} = general_tx_coord_sup:start_fsm([self(), StartPartId, Operations]),
     receive
         EndOfTx ->

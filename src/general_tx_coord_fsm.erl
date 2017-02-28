@@ -69,12 +69,13 @@
 	  from :: {pid(), term()},
 	  tx_id :: txid(),
       start_part_id :: integer(),
-    operations :: [],
+      operations :: [],
 	  num_to_ack :: non_neg_integer(),
 	  prepare_time :: non_neg_integer(),
     updated_partitions :: dict(),
     read_set :: [],
     causal_clock :: non_neg_integer(),
+      aggr_clock :: non_neg_integer(),
 	  state :: active | prepared | committing | committed | undefined | aborted}).
 
 %%%===================================================================
@@ -109,7 +110,6 @@ perform_singleitem_read(Key) ->
 
 %% @doc Initialize the state.
 init([From, ClientClock, StartPartId, Operations]) ->
-    %lager:info("Initiating..."),
     random:seed(now()),
     SD = #state{
             causal_clock = ClientClock,
@@ -121,6 +121,7 @@ init([From, ClientClock, StartPartId, Operations]) ->
             prepare_time=0,
             wait=0,
             missed=[],
+            aggr_clock = 0,
             wait_prepare=0
            },
   {ok, execute_batch_ops, SD, 0}.
@@ -129,27 +130,30 @@ init([From, ClientClock, StartPartId, Operations]) ->
 %% @doc Contact the leader computed in the prepare state for it to execute the
 %%      operation, wait for it to finish (synchronous) and go to the prepareOP
 %%       to execute the next operation.
-execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
+execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrClock,
                     start_part_id=StartPartId, operations=Operations}) ->
+   %lager:warning("Executing"),
     TxId = clock_utilities:get_tx_id(Operations, StartPartId, CausalClock),
-    ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0}) ->
+    ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0, Clock0}) ->
                     case Operation of
                         {read, Key} ->
                             case dict:find(Key, Buffer) of
                                 error ->
                                     Preflist = hash_fun:get_preflist_from_key(Key),
                                     IndexNode = hd(Preflist),
-                                    {ok, Snapshot} = partition_vnode:read_data_item(IndexNode, Key, TxId),
+                                    {ok, Snapshot, GotClock} = partition_vnode:read_data_item(IndexNode, Key, TxId, Clock0),
                                     {_Value, MissedVersions, WaitRead} = Snapshot,
                                     Missed1 = [MissedVersions|Missed0],
+                                    NewClock = max(GotClock, Clock0),
                                     Wait1 = Wait0 + WaitRead; 
                                 {ok, Snapshot} ->
                                     {_Value, MissedVersions, _Wait} = Snapshot,
                                     Missed1 = [MissedVersions|Missed0],
+                                    NewClock = Clock0,
                                     Wait1 = Wait0 
                             end,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
-                            {UpdatedParts, [Snapshot|RSet], Buffer1, Wait1, Missed1};
+                            {UpdatedParts, [Snapshot|RSet], Buffer1, Wait1, Missed1, NewClock};
                         {update, Key, Op, Param} ->
                             Preflist = hash_fun:get_preflist_from_key(Key),
                             IndexNode = hd(Preflist),
@@ -167,20 +171,21 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
                                             NewSnapshot = update_object:update(S1, Op, Param),
                                             dict:store(Key, {NewSnapshot, 0, 0}, Buffer)
                                         end,
-                            {UpdatedParts1, RSet, Buffer1, Wait0, Missed0}
+                            {UpdatedParts1, RSet, Buffer1, Wait0, Missed0, Clock0}
                     end
                 end,
-    {WriteSet1, ReadSet1, _, WaitRead, FinalMissed} = lists:foldl(ProcessOp, {dict:new(), [], dict:new(), 0, []}, Operations),
+    {WriteSet1, ReadSet1, _, WaitRead, FinalMissed, AggrClock1} 
+            = lists:foldl(ProcessOp, {dict:new(), [], dict:new(), 0, [], AggrClock}, Operations),
     case dict:size(WriteSet1) of
         0->
             %TODO?: Change by taking maxReadTS
             reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, wait=WaitRead, missed=FinalMissed,
-                prepare_time=TxId#tx_id.snapshot_time});
+                prepare_time=TxId#tx_id.snapshot_time, aggr_clock=AggrClock1});
         N->
            %lager:warning("TxId is ~w, waiting for ~w replies, writeset is ~w", [TxId, N, WriteSet1]),
-            partition_vnode:prepare(WriteSet1, TxId),
+            partition_vnode:prepare(WriteSet1, TxId, AggrClock1),
             {next_state, receive_reply, SD#state{num_to_ack=N, state=prepared, wait=WaitRead, missed=FinalMissed,
-                updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId}}
+                updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId, aggr_clock=AggrClock1}}
     end.
 
 %% @doc in this state, the fsm waits for prepare_time from each updated
@@ -188,24 +193,26 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock,
 %%      of the received prepare_time).
 receive_reply({prepared, ReceivedPrepareTime, Wait},
                  S0=#state{num_to_ack=NumToAck, tx_id=TxId, updated_partitions=UpdatedPartitions,
-                            prepare_time=PrepareTime, wait_prepare=WaitPrepare0}) ->
+                            prepare_time=PrepareTime, wait_prepare=WaitPrepare0, aggr_clock=AggrClock}) ->
     MaxPrepareTime = max(PrepareTime, ReceivedPrepareTime),
     WaitPrepare1 = max(WaitPrepare0, Wait),
     case NumToAck of 
         1 ->
             partition_vnode:commit(UpdatedPartitions, TxId, MaxPrepareTime),
-            reply_to_client(S0#state{state=committed, prepare_time=MaxPrepareTime, wait_prepare=WaitPrepare1});
+            reply_to_client(S0#state{state=committed, prepare_time=MaxPrepareTime, 
+                aggr_clock=max(AggrClock, MaxPrepareTime), wait_prepare=WaitPrepare1});
         _ ->
             {next_state, receive_reply,
-             S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime, wait_prepare=WaitPrepare1}}
+             S0#state{num_to_ack= NumToAck-1, prepare_time=MaxPrepareTime,
+                aggr_clock=max(AggrClock, MaxPrepareTime),  wait_prepare=WaitPrepare1}}
     end;
 
-receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, prepare_time=MaxPrepareTime}) ->
-    partition_vnode:abort(UpdatedPartitions, TxId, MaxPrepareTime),
+receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, aggr_clock=AggrClock}) ->
+    partition_vnode:abort(UpdatedPartitions, TxId, AggrClock),
     reply_to_client(S0#state{state=aborted});
 
-receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, prepare_time=MaxPrepareTime}) ->
-    partition_vnode:abort(UpdatedPartitions, TxId, MaxPrepareTime),
+receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, aggr_clock=AggrClock}) ->
+    partition_vnode:abort(UpdatedPartitions, TxId, AggrClock),
     reply_to_client(S0#state{state=aborted}).
 
 %% @doc when the transaction has committed or aborted,

@@ -25,7 +25,7 @@
 -export([get_tx_id/3,
          init_clock/1,
          get_snapshot_time/1,
-         catch_up/2,
+         catch_up/3,
          catch_up_if_aggr/2,
          force_catch_up/2,
          get_prepare_time/1, 
@@ -91,7 +91,7 @@ get_snapshot_time(Clock) ->
             {ok, max(Physical1, Logical), Clock#bravo{physical=Physical1}}
     end.
 
-catch_up(Clock, SnapshotTime) ->
+catch_up(Clock, SnapshotTime, AggrClock) ->
     case Clock of
         #physical{last=Last} ->
             Now = now_microsec_new(Last), 
@@ -99,7 +99,7 @@ catch_up(Clock, SnapshotTime) ->
         #logical{last=Last} ->
             {ok, 0, Clock#logical{last=max(Last, SnapshotTime)}};
         #aggr_logical{last=Last} ->
-            {ok, 0, Clock#aggr_logical{last=max(Last, SnapshotTime)}};
+            {ok, 0, Clock#aggr_logical{last=max(max(Last, SnapshotTime), AggrClock)}};
         #hybrid{physical=_Physical0, logical=Logical} ->
             {ok, 0, Clock#hybrid{logical=max(Logical, SnapshotTime)}};
         #bravo{physical=_Physical0, logical=Logical} ->

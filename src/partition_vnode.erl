@@ -24,12 +24,12 @@
 -define(NUM_VERSION, 20).
 
 -export([start_vnode/1,
-	      read_data_item/3,
-	      get_cache_name/2,
+	    read_data_item/4,
+	    get_cache_name/2,
         set_prepared/4,
         update_store/6,
         get_snapshot_time/2,
-        prepare/2,
+        prepare/3,
         commit/3,
         abort/3,
         init/1,
@@ -82,16 +82,16 @@ start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
 
 %% @doc Sends a read request to the Node that is responsible for the Key
-read_data_item(Node, Key, TxId) ->
+read_data_item(Node, Key, TxId, AggrClock) ->
     riak_core_vnode_master:sync_command(Node,
-                                   {read, Key, TxId},
+                                   {read, Key, TxId, AggrClock},
                                    ?CLOCKSI_MASTER, infinity).
 
 %% @doc Sends a prepare request to a Node involved in a tx identified by TxId
-prepare(ListofNodes, TxId) ->
+prepare(ListofNodes, TxId, AggrClock) ->
     dict:fold(fun(Node, WriteSet, _Acc) ->
 			riak_core_vnode_master:command(Node,
-						       {prepare, TxId, [Key||{Key, _, _} <- WriteSet]},
+						       {prepare, TxId, [Key||{Key, _, _} <- WriteSet], AggrClock},
     						       {fsm, undefined, self()},
 						       ?CLOCKSI_MASTER)
 		end, ok, ListofNodes).
@@ -180,7 +180,7 @@ check_prepared_empty([{Partition,Node}|Rest]) ->
 	    true ->
             ok;
 	    false ->
-            lager:warning("Prepared not empty!")
+           lager:warning("Prepared not empty!")
     end,
 	check_prepared_empty(Rest).
 
@@ -221,13 +221,13 @@ handle_command({pending_read, TxId, Key, Sender, Wait}, _From, SD0=#state{clock=
             {noreply, SD0#state{clock=Clock0}};
         ready ->
             {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-            riak_core_vnode:reply(Sender, {ok, {Value, Missed, Wait}}),
+            riak_core_vnode:reply(Sender, {ok, {Value, Missed, Wait}, Clock0}),
             {noreply, SD0#state{clock=Clock0}}
     end;
 
-handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
+handle_command({read, Key, TxId, AggrClock}, Sender, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
                     inmemory_store=InMemoryStore}) ->
-    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time, AggrClock),
     case round(Wait/1000) > 0 of
         true ->
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_read, TxId, Key, Sender, Wait}),
@@ -239,7 +239,8 @@ handle_command({read, Key, TxId}, Sender, SD0=#state{clock=Clock, prepared_txs=P
                     {noreply, SD0#state{clock=Clock1}};
                 ready ->
                     {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-                    riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}}),
+                   %lager:warning("Trying to reply read ~w", [Clock1]),
+                    riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}, Clock1}),
                     {noreply, SD0#state{clock=Clock1}}
             end
     end;
@@ -261,15 +262,15 @@ handle_command({pending_prepare, TxId, WriteSet, Sender, Wait}, _From,
     	    {noreply, State}
     end;
 
-handle_command({prepare, TxId, WriteSet}, Sender,
+handle_command({prepare, TxId, WriteSet, AggrClock}, Sender,
                State = #state{partition=_Partition,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
                               prepared_txs=PreparedTxs,
-			      pending_prepare=PendingPrepare
+			                  pending_prepare=PendingPrepare
                               }) ->
-    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time),
+    {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time, AggrClock),
    %lager:warning("~w prepare, waiting is ~w", [TxId, Wait]),
     case round(Wait/1000) > 0 of
         true ->
@@ -320,7 +321,7 @@ handle_command({abort, TxId, Updates, MaxClock}, _Sender,
 
 
 %%%%%%%%%%%%%%  Handle clock-related commands  %%%%%%%%%%%%%%%%%%%%%%%%
-handle_command({get_snapshot_time, _CausalTS}, _Sender, #state{clock=Clock}=State) ->
+handle_command({get_snapshot_time, _CausalClock}, _Sender, #state{clock=Clock}=State) ->
     {ok, SnapshotTime, Clock1} = clock_utilities:get_snapshot_time(Clock),
     {reply, SnapshotTime, State#state{clock=Clock1}};
 
