@@ -141,6 +141,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrCl
                                 error ->
                                     Preflist = hash_fun:get_preflist_from_key(Key),
                                     IndexNode = hd(Preflist),
+                                    lager:warning("~w to access ~w", [Key, Preflist]),
                                     {ok, Snapshot, GotClock} = partition_vnode:read_data_item(IndexNode, Key, TxId, Clock0),
                                     {_Value, MissedVersions, WaitRead} = Snapshot,
                                     Missed1 = [MissedVersions|Missed0],
@@ -156,6 +157,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrCl
                             {UpdatedParts, [Snapshot|RSet], Buffer1, Wait1, Missed1, NewClock};
                         {update, Key, Op, Param} ->
                             Preflist = hash_fun:get_preflist_from_key(Key),
+                            lager:warning("~w to access ~w", [Key, Preflist]),
                             IndexNode = hd(Preflist),
                             UpdatedParts1 = case dict:is_key(IndexNode, UpdatedParts) of
                                                 false ->
