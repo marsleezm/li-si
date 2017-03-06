@@ -33,6 +33,7 @@
          now_microsec_new/1]).
 
 -record(physical, {last}).
+-record(fake_physical, {last}).
 -record(logical, {last}).
 -record(aggr_logical, {last}).
 -record(hybrid, {physical, logical}).
@@ -64,6 +65,8 @@ init_clock(ClockType) ->
     case ClockType of
         physical ->
             {ok, #physical{last=0}};
+        fake_physical ->
+            {ok, #fake_physical{last=0}};
         logical ->
             {ok, #logical{last=0}};
         aggr_logical ->
@@ -79,6 +82,9 @@ get_snapshot_time(Clock) ->
         #physical{last=Last} ->
             Now = now_microsec_new(Last),
             {ok, Now, Clock#physical{last=Now}};
+        #fake_physical{last=Last} ->
+            Now = now_microsec_new(Last),
+            {ok, Now, Clock#fake_physical{last=Now}};
         #logical{last=Last} ->
             {ok, Last, Clock};
         #aggr_logical{last=Last} ->
@@ -96,6 +102,9 @@ catch_up(Clock, SnapshotTime, AggrClock) ->
         #physical{last=Last} ->
             Now = now_microsec_new(Last), 
             {ok, SnapshotTime - Now, Clock#physical{last=Now}};
+        #fake_physical{last=Last} ->
+            Now = now_microsec_new(Last), 
+            {ok, 0, Clock#fake_physical{last=Now}};
         #logical{last=Last} ->
             {ok, 0, Clock#logical{last=max(Last, SnapshotTime)}};
         #aggr_logical{last=Last} ->
@@ -110,6 +119,8 @@ force_catch_up(Clock, SnapshotTime) ->
     case Clock of
         #physical{last=Last} ->
             {ok, Clock#physical{last=max(Last, SnapshotTime)}};
+        #fake_physical{last=Last} ->
+            {ok, Clock#fake_physical{last=max(Last, SnapshotTime)}};
         _ ->
 	    {ok, Clock}
     end.
@@ -127,6 +138,9 @@ get_prepare_time(Clock) ->
         #physical{last=Last} ->
             Now = now_microsec_new(Last),
             {ok, Now, Clock#physical{last=Now}};
+        #fake_physical{last=Last} ->
+            Now = now_microsec_new(Last),
+            {ok, Now, Clock#fake_physical{last=Now}};
         #logical{last=Last} ->
             {ok, Last+1, Clock#logical{last=Last+1}};
         #aggr_logical{last=Last} ->
