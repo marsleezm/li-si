@@ -132,7 +132,6 @@ init([From, ClientClock, StartPartId, Operations]) ->
 %%       to execute the next operation.
 execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrClock,
                     start_part_id=StartPartId, operations=Operations}) ->
-   %lager:warning("Executing"),
     TxId = clock_utilities:get_tx_id(Operations, StartPartId, CausalClock),
     ProcessOp = fun(Operation, {UpdatedParts, RSet, Buffer, Wait0, Missed0, Clock0}) ->
                     case Operation of

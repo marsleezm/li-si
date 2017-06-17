@@ -26,8 +26,9 @@
 -export([start_vnode/1,
 	    read_data_item/4,
 	    get_cache_name/2,
-        set_prepared/4,
-        update_store/6,
+        print_stat/1,
+        set_prepared/5,
+        update_store/7,
         get_snapshot_time/2,
         prepare/3,
         commit/3,
@@ -66,11 +67,13 @@
 %%              generate.
 %%----------------------------------------------------------------------
 -record(state, {partition :: non_neg_integer(),
+                commit_diff :: {non_neg_integer(), non_neg_integer()},
                 prepared_txs :: cache_id(),
                 committed_txs :: cache_id(),
                 pending_prepare :: cache_id(),
                 if_certify :: boolean(),
                 if_replicate :: boolean(),
+                if_precise :: boolean(),
                 inmemory_store :: cache_id(),
                 clock}).
 
@@ -86,6 +89,15 @@ read_data_item(Node, Key, TxId, AggrClock) ->
     riak_core_vnode_master:sync_command(Node,
                                    {read, Key, TxId, AggrClock},
                                    ?CLOCKSI_MASTER, infinity).
+
+%% @doc Ask all nodes to print its status 
+print_stat(ListofNodes) ->
+    lists:foreach(fun(Node) ->
+			riak_core_vnode_master:command(Node,
+						       {print_stat},
+    						       {fsm, undefined, self()},
+						       ?CLOCKSI_MASTER)
+		end, ListofNodes).
 
 %% @doc Sends a prepare request to a Node involved in a tx identified by TxId
 prepare(ListofNodes, TxId, AggrClock) ->
@@ -135,12 +147,22 @@ init([Partition]) ->
     IfCertify = antidote_config:get(do_cert),
 
     ClockType = antidote_config:get(clock_type),
+    IfPrecise = antidote_config:get(if_precise),
+    case IfPrecise of
+        true ->
+            true = ClockType /= physical,
+            true = ClockType /= hybrid;
+        false ->
+            ok
+    end,
     {ok, Clock} = clock_utilities:init_clock(ClockType),
 
     {ok, #state{partition=Partition,
                 committed_txs=CommittedTxs,
                 prepared_txs=PreparedTxs,
                 if_certify = IfCertify,
+                if_precise = IfPrecise,
+                commit_diff = {0,0},
                 inmemory_store=InMemoryStore,
 		        pending_prepare=PendingPrepare,
                 clock=Clock}}.
@@ -194,6 +216,10 @@ open_table(Partition, Name) ->
 	      open_table(Partition, Name)
     end.
 
+handle_command({print_stat},_Sender,SD0=#state{commit_diff={Count, Diff}, partition=Partition}) ->
+    lager:info("Partition ~w: count is ~w, avg diff of commit and prepare time is ~w", [Partition, Count, Diff/Count]), 
+    {noreply, SD0};
+
 handle_command({check_tables_ready},_Sender,SD0=#state{partition=Partition}) ->
     Result = case ets:info(get_cache_name(Partition,prepared)) of
 		 undefined ->
@@ -214,9 +240,9 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
     end;
 
 handle_command({pending_read, TxId, Key, Sender, Wait}, _From, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
-                    inmemory_store=InMemoryStore}) ->
+                    inmemory_store=InMemoryStore, if_precise=IfPrecise}) ->
     {ok, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
-    case ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) of
+    case ready_or_block(TxId, Key, PreparedTxs, Sender, Wait, Clock0, IfPrecise) of
         not_ready ->
             {noreply, SD0#state{clock=Clock0}};
         ready ->
@@ -226,20 +252,19 @@ handle_command({pending_read, TxId, Key, Sender, Wait}, _From, SD0=#state{clock=
     end;
 
 handle_command({read, Key, TxId, AggrClock}, Sender, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
-                    inmemory_store=InMemoryStore}) ->
+                    inmemory_store=InMemoryStore, if_precise=IfPrecise}) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time, AggrClock),
     case round(Wait/1000) > 0 of
         true ->
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_read, TxId, Key, Sender, Wait}),
             {noreply, SD0#state{clock=Clock0}};
         false ->
-	    {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
-            case ready_or_block(TxId, Key, PreparedTxs, Sender, 0) of
+	        {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
+            case ready_or_block(TxId, Key, PreparedTxs, Sender, 0, Clock0, IfPrecise) of
                 not_ready ->
                     {noreply, SD0#state{clock=Clock1}};
                 ready ->
                     {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-                   %lager:warning("Trying to reply read ~w", [Clock1]),
                     riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}, Clock1}),
                     {noreply, SD0#state{clock=Clock1}}
             end
@@ -250,13 +275,14 @@ handle_command({pending_prepare, TxId, WriteSet, Sender, Wait}, _From,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
+                              if_precise=IfPrecise,
                               prepared_txs=PreparedTxs,
-			      pending_prepare=PendingPrepare
+			                  pending_prepare=PendingPrepare
                               }) ->
     case ets:lookup(PendingPrepare, TxId) of
     	[{TxId, pending}] ->
             ets:delete(PendingPrepare, TxId),
-    	    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait),
+    	    Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait, IfPrecise),
     	    {noreply, State#state{clock=Clock1}};
         [] ->
     	    {noreply, State}
@@ -267,6 +293,7 @@ handle_command({prepare, TxId, WriteSet, AggrClock}, Sender,
                               committed_txs=CommittedTxs,
                               clock=Clock,
                               if_certify=IfCertify,
+                              if_precise=IfPrecise,
                               prepared_txs=PreparedTxs,
 			                  pending_prepare=PendingPrepare
                               }) ->
@@ -274,11 +301,11 @@ handle_command({prepare, TxId, WriteSet, AggrClock}, Sender,
    %lager:warning("~w prepare, waiting is ~w", [TxId, Wait]),
     case round(Wait/1000) > 0 of
         true ->
-	    true = ets:insert(PendingPrepare, {TxId, pending}),
+	        true = ets:insert(PendingPrepare, {TxId, pending}),
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_prepare, TxId, WriteSet, Sender, Wait}),
             {noreply, State#state{clock=Clock0}};
         false ->
-   	        Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock0, 0),
+   	        Clock1 = prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock0, 0, IfPrecise),
     	    {noreply, State#state{clock=Clock1}}
     end;
 
@@ -289,19 +316,20 @@ handle_command({commit, TxId, TxCommitTime, Updates}, _Sender,
                #state{partition=_Partition,
                       committed_txs=CommittedTxs,
                       prepared_txs=PreparedTxs,
-                      inmemory_store=InMemoryStore
+                      inmemory_store=InMemoryStore,
+                      commit_diff = {Count, TimeDiff} 
                       } = State) ->
    %lager:warning("~w committed in ~w", [TxId, _Partition]),
     Result = commit(TxId, TxCommitTime, Updates, CommittedTxs, PreparedTxs, InMemoryStore),
     case Result of
-        {ok, committed} ->
-            {noreply, State};
+        {ok, DiffInTime, committed} ->
+            {noreply, State#state{commit_diff={Count+1, TimeDiff+DiffInTime}}};
         {error, no_updates} ->
             {reply, no_tx_record, State}
     end;
 
 handle_command({abort, TxId, Updates, MaxClock}, _Sender,
-               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare, clock=MyClock} = State) ->
+               #state{partition=_Partition, prepared_txs=PreparedTxs, inmemory_store=InMemoryStore, pending_prepare=PendingPrepare, clock=MyClock, if_precise=IfPrecise} = State) ->
    %lager:warning("~w geting aborted in ~w", [TxId, _Partition]),
     {ok, MyClock1} = clock_utilities:catch_up_if_aggr(MyClock, MaxClock),
     case Updates of
@@ -315,7 +343,7 @@ handle_command({abort, TxId, Updates, MaxClock}, _Sender,
                 [] ->
 		    noop
             end,
-            clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore),
+            clean_abort_prepared(PreparedTxs,Updates,TxId, InMemoryStore, IfPrecise),
             {noreply, State#state{clock=MyClock1}}
     end;
 
@@ -368,78 +396,116 @@ terminate(_Reason, #state{partition=Partition} = _State) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
-prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, PrepareTime, IfCertify)->
-    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify) of
+prepare(TxId, TxWriteSet, CommittedTx, PreparedTxs, PrepareTime, IfCertify, IfPrecise)->
+    case certification_check(TxId, TxWriteSet, CommittedTx, PreparedTxs, IfCertify, IfPrecise, 0) of
         true ->
-		    set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime),
+		    set_prepared(PreparedTxs, TxWriteSet, TxId, PrepareTime, IfPrecise),
 		    ok;
+        {true, PrecisePrepTime} ->
+            IfPrecise = true,
+            ToPrepTime = max(PrecisePrepTime, TxId#tx_id.snapshot_time)+1,
+            %lager:warning("Precise time is ~w, ToPrepTime is ~w", [PrecisePrepTime, ToPrepTime]),
+		    set_prepared(PreparedTxs, TxWriteSet, TxId, ToPrepTime, IfPrecise),
+		    {ok, ToPrepTime};
 	    false ->
 	        {error, write_conflict};
         wait ->
             {error, wait_more}
     end.
 
-set_prepared(_PreparedTxs,[],_TxId,_Time) ->
+set_prepared(_PreparedTxs,[],_TxId,_Time, _) ->
     ok;
-set_prepared(PreparedTxs,[Key | Rest],TxId,Time) ->
+set_prepared(PreparedTxs,[Key | Rest],TxId,Time, false) ->
     true = ets:insert(PreparedTxs, {Key, {TxId, Time, []}}),
-    set_prepared(PreparedTxs,Rest,TxId,Time).
+    set_prepared(PreparedTxs,Rest,TxId,Time, false);
+set_prepared(PreparedTxs,[Key | Rest],TxId,Time, true) ->
+    true = ets:insert(PreparedTxs, {Key, Time, {TxId, Time, []}}),
+    set_prepared(PreparedTxs,Rest,TxId,Time, true).
 
-commit(TxId, TxCommitTime, Updates, CommittedTxs,
-                                PreparedTxs, InMemoryStore)->
-    update_store(Updates, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs),
-    {ok, committed}.
+commit(TxId, TxCommitTime, Updates, CommittedTxs, PreparedTxs, InMemoryStore)->
+    DiffInTime = update_store(Updates, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs, 0),
+    {ok, DiffInTime, committed}.
 
-clean_abort_prepared(_PreparedTxs,[],_TxId,_) ->
+clean_abort_prepared(_PreparedTxs,[],_TxId,_, _) ->
     ok;
-clean_abort_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore) ->
+clean_abort_prepared(PreparedTxs,[{Key, _Op, _Param} | Rest],TxId,InMemoryStore, IfPrecise) ->
     case ets:lookup(PreparedTxs, Key) of
         [{Key, {TxId, _Time, PendingReaders}}] ->
             case ets:lookup(InMemoryStore, Key) of
                 [{Key, ValueList}] ->
                     {_, Value} = hd(ValueList),
-                    lists:foreach(fun({_SnapshotTime, Sender, Wait}) -> riak_core_vnode:reply(Sender, {ok, {Value, 0, Wait}}) end, PendingReaders);
+                    lists:foreach(fun({_SnapshotTime, Sender, Wait, Clock}) -> riak_core_vnode:reply(Sender, {ok, {Value, 0, Wait}, Clock}) end, PendingReaders);
                 [] ->
-                    lists:foreach(fun({_SnapshotTime, Sender, Wait}) -> riak_core_vnode:reply(Sender, {ok, {nil, 0, Wait}}) end, PendingReaders)
+                    lists:foreach(fun({_SnapshotTime, Sender, Wait, Clock}) -> riak_core_vnode:reply(Sender, {ok, {nil, 0, Wait}, Clock}) end, PendingReaders)
             end,
             true = ets:delete(PreparedTxs, Key);
+        [{Key, LastReader, {TxId, _Time, PendingReaders}}] ->
+            IfPrecise = true,
+            case ets:lookup(InMemoryStore, Key) of
+                [{Key, ValueList}] ->
+                    {_, Value} = hd(ValueList),
+                    lists:foreach(fun({_SnapshotTime, Sender, Wait, Clock}) -> riak_core_vnode:reply(Sender, {ok, {Value, 0, Wait}, Clock}) end, PendingReaders);
+                [] ->
+                    lists:foreach(fun({_SnapshotTime, Sender, Wait, Clock}) -> riak_core_vnode:reply(Sender, {ok, {nil, 0, Wait}, Clock}) end, PendingReaders)
+            end,
+            true = ets:insert(PreparedTxs, {Key, LastReader});
         _ ->
             ok
     end,
-    clean_abort_prepared(PreparedTxs,Rest,TxId, InMemoryStore).
+    clean_abort_prepared(PreparedTxs,Rest,TxId, InMemoryStore, IfPrecise).
 
 %% @doc Performs a certification check when a transaction wants to move
 %%      to the prepared state.
-certification_check(_, _, _, _, false) ->
+certification_check(_, _, _, _, false, _, 0) ->
     true;
-certification_check(_, [], _, _, true) ->
+certification_check(_, [], _, _, true, false, 0) ->
     true;
-certification_check(TxId, [Key|T], CommittedTxs, PreparedTxs, true) ->
+certification_check(_, [], _, _, true, true, PrepareTime) ->
+    {true, PrepareTime};
+certification_check(TxId, [Key|T], CommittedTxs, PreparedTxs, true, IfPrecise, PrepTime) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     case ets:lookup(CommittedTxs, Key) of
         [{Key, CommitTime}] ->
             case CommitTime > SnapshotTime of
                 true ->
-                   %lager:warning("Certification for key ~w, abort, ct ~w, st ~w", [Key, CommitTime, SnapshotTime]),
+                    %lager:warning("Abort key ~w: ct ~w, st ~w", [Key, CommitTime, SnapshotTime]),
                     false;
                 false ->
-                    case check_prepared(TxId, PreparedTxs, Key) of
+                    case check_prepared(TxId, PreparedTxs, Key, IfPrecise) of
                         true ->
-                            certification_check(TxId, T, CommittedTxs, PreparedTxs, true);
+                            certification_check(TxId, T, CommittedTxs, PreparedTxs, true, IfPrecise, PrepTime);
+                        {true, LastReader} ->
+                            certification_check(TxId, T, CommittedTxs, PreparedTxs, true, 
+                                IfPrecise, max(LastReader, PrepTime));
                         false ->
                             false
                     end
             end;
         [] ->
-            case check_prepared(TxId, PreparedTxs, Key) of
+            case check_prepared(TxId, PreparedTxs, Key, IfPrecise) of
                 true ->
-                    certification_check(TxId, T, CommittedTxs, PreparedTxs, true);
+                    certification_check(TxId, T, CommittedTxs, PreparedTxs, true, IfPrecise, PrepTime);
+                {true, LastReader} ->
+                    certification_check(TxId, T, CommittedTxs, PreparedTxs, true, 
+                        IfPrecise, max(LastReader, PrepTime));
                 false ->
                     false
             end
     end.
 
-check_prepared(_TxId, PreparedTxs, Key) ->
+check_prepared(_TxId, PreparedTxs, Key, true) ->
+    case ets:lookup(PreparedTxs, Key) of
+        [] ->
+            %lager:warning("~w ~w: LastReader is empty", [_TxId, Key]),
+            true;
+        [{Key, LastReader}] ->
+            %lager:warning("~w ~w: LastReader is ~w", [_TxId, Key, LastReader]),
+            {true, LastReader};
+        _R ->
+            %lager:warning("Abort key ~w: ~w is here, TxId is ~w!", [Key, _R, _TxId]),
+            false
+    end;
+check_prepared(_TxId, PreparedTxs, Key, false) ->
     case ets:lookup(PreparedTxs, Key) of
         [] ->
             true;
@@ -448,7 +514,38 @@ check_prepared(_TxId, PreparedTxs, Key) ->
             false
     end.
 
-ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) ->
+ready_or_block(TxId, Key, PreparedTxs, Sender, Wait, Clock, true) ->
+    SnapshotTime = TxId#tx_id.snapshot_time,
+    case ets:lookup(PreparedTxs, Key) of
+        [] ->
+            %lager:warning("~w ~w: reading empty!", [TxId, Key]),
+            ready;
+        [{Key, LastReader}] ->
+            %lager:warning("~w ~w: read empty reader! ~w", [TxId, Key, LastReader]),
+            case LastReader < SnapshotTime of
+                true -> ets:insert(PreparedTxs, {Key, SnapshotTime});
+                false -> ok
+            end,
+            ready;
+        [{Key, LastReader, {PreparedTxId, PrepareTime, PendingReader}=Record}] ->
+            case PrepareTime =< SnapshotTime of
+                true ->
+                    %lager:warning("~w ~w: blocked! PrepTime ~w, LastReader ~w", [TxId, Key, PrepareTime, LastReader]),
+                    ets:insert(PreparedTxs, {Key, max(SnapshotTime, LastReader), 
+                        {PreparedTxId, PrepareTime, [{TxId#tx_id.snapshot_time, Sender, Wait, Clock}|PendingReader]}}),
+                    not_ready;
+                false ->
+                    %lager:warning("~w ~w: not blocked! PrepTime ~w, LastReader ~w", [TxId, Key, PrepareTime, LastReader]),
+                    case LastReader < SnapshotTime of
+                        true ->
+                            ets:insert(PreparedTxs, {Key, SnapshotTime, Record});
+                        false ->
+                            ok
+                    end,
+                    ready
+            end
+    end;
+ready_or_block(TxId, Key, PreparedTxs, Sender, Wait, Clock, false) ->
     SnapshotTime = TxId#tx_id.snapshot_time,
     case ets:lookup(PreparedTxs, Key) of
         [] ->
@@ -457,7 +554,7 @@ ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) ->
             case PrepareTime =< SnapshotTime of
                 true ->
                     ets:insert(PreparedTxs, {Key, {PreparedTxId, PrepareTime,
-                        [{TxId#tx_id.snapshot_time, Sender, Wait}|PendingReader]}}),
+                        [{TxId#tx_id.snapshot_time, Sender, Wait, Clock}|PendingReader]}}),
                     not_ready;
                 false ->
                     ready
@@ -466,10 +563,10 @@ ready_or_block(TxId, Key, PreparedTxs, Sender, Wait) ->
 
 -spec update_store(KeyValues :: [{key(), atom(), term()}],
                           TxId::txid(),TxCommitTime:: {term(), term()}, CommittedTxs :: cache_id(),
-                                InMemoryStore :: cache_id(), PreparedTxs :: cache_id()) -> ok.
-update_store([], _TxId, _TxCommitTime, _CommittedTxs, _InMemoryStore, _PreparedTxs) ->
-    ok;
-update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs) ->
+                        InMemoryStore :: cache_id(), PreparedTxs :: cache_id(), DiffInTime :: non_neg_integer()) -> ok.
+update_store([], _TxId, _TxCommitTime, _CommittedTxs, _InMemoryStore, _PreparedTxs, DiffInTime) ->
+    DiffInTime;
+update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs, DiffInTime) ->
     Values= case ets:lookup(InMemoryStore, Key) of
                 [] ->
                     NewSnapshot = update_object:update(Op, Param),
@@ -483,24 +580,39 @@ update_store([{Key, Op, Param}|Rest], TxId, TxCommitTime, CommittedTxs, InMemory
                     {_, FirstValue} = hd(ValueList),
                     [FirstValue, NewSnapshot]
             end,
-    case ets:lookup(PreparedTxs, Key) of
-        [{Key, {TxId, _Time, PendingReaders}}] ->
-            lists:foreach(fun({SnapshotTime, Sender, Wait}) ->
-                    case SnapshotTime >= TxCommitTime of
-                        true ->
-                            riak_core_vnode:reply(Sender, {ok, {lists:nth(2, Values), 1, Wait}});
-                        false ->
-                            riak_core_vnode:reply(Sender, {ok, {hd(Values), 0, Wait}})
-                    end end,
-                PendingReaders),
-            true = ets:delete(PreparedTxs, Key);
-        [] ->
-            ok;
-        Record ->
-            lager:error("Something is wrong!!! ~w ~w", [TxId, TxCommitTime, Record])
-    end,
+    NewDiff = case ets:lookup(PreparedTxs, Key) of
+            [{Key, {TxId, _Time, PendingReaders}}] ->
+                lists:foreach(fun({SnapshotTime, Sender, Wait, Clock}) ->
+                        case SnapshotTime >= TxCommitTime of
+                            true ->
+                                riak_core_vnode:reply(Sender, {ok, {lists:nth(2, Values), 1, Wait}, Clock});
+                            false ->
+                                riak_core_vnode:reply(Sender, {ok, {hd(Values), 0, Wait}, Clock})
+                        end end,
+                    PendingReaders),
+                %lager:warning("~w diff is ~w", [TxId, TxCommitTime-_Time]),
+                true = ets:delete(PreparedTxs, Key),
+                max(TxCommitTime-_Time, DiffInTime);
+            [{Key, LastReader, {TxId, _Time, PendingReaders}}] ->
+                lists:foreach(fun({SnapshotTime, Sender, Wait, Clock}) ->
+                        case SnapshotTime >= TxCommitTime of
+                            true ->
+                                riak_core_vnode:reply(Sender, {ok, {lists:nth(2, Values), 1, Wait}, Clock});
+                            false ->
+                                riak_core_vnode:reply(Sender, {ok, {hd(Values), 0, Wait}, Clock})
+                        end end,
+                    PendingReaders),
+                %lager:warning("~w diff is ~w", [TxId, TxCommitTime-_Time]),
+                true = ets:insert(PreparedTxs, {Key, LastReader}),
+                max(TxCommitTime-_Time, DiffInTime);
+            [] ->
+                DiffInTime;
+            Record ->
+                lager:error("Something is wrong!!! ~w ~w", [TxId, TxCommitTime, Record]),
+                DiffInTime
+        end,
     ets:insert(CommittedTxs, {Key, TxCommitTime}),
-    update_store(Rest, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs).
+    update_store(Rest, TxId, TxCommitTime, CommittedTxs, InMemoryStore, PreparedTxs, NewDiff).
 
 %% @doc return:
 %%  - Reads and returns the log of specified Key using replication layer.
@@ -525,17 +637,34 @@ find_version([{TS, Value}|Rest], SnapshotTime, Missed) ->
             find_version(Rest, SnapshotTime, Missed+1)
     end.
 
-prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait) ->
+prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait, IfPrecise) ->
     {ok, Clock1} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
-    {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
-    Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, IfCertify),
-    case Result of
-    	ok ->
-           %lager:warning("~w passed prepare", [TxId]),
-            riak_core_vnode:reply(Sender, {prepared, PrepareTime, Wait});
-        {error, write_conflict} ->
-           %lager:warning("~w failed prepare", [TxId]),
-            riak_core_vnode:reply(Sender, abort)
-    end,
-    Clock2.
-
+    case IfPrecise of
+        false ->
+            {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),
+            Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, PrepareTime, 
+                    IfCertify, IfPrecise),
+            case Result of
+                ok ->
+                    riak_core_vnode:reply(Sender, {prepared, PrepareTime, Wait});
+                {error, write_conflict} ->
+                    riak_core_vnode:reply(Sender, abort)
+            end,
+            Clock2;
+        true ->
+            Result = prepare(TxId, WriteSet, CommittedTxs, PreparedTxs, 0, 
+                    IfCertify, IfPrecise),
+            case Result of
+                {ok, ToPrepTime} ->
+                   %lager:warning("~w passed prepare", [TxId]),
+                    IfPrecise = true,
+                    riak_core_vnode:reply(Sender, {prepared, ToPrepTime, Wait}),
+                    %% No aggr clock available, giving 0 does not affect. 
+                    {ok, 0, Clock2} = clock_utilities:catch_up(Clock, ToPrepTime, 0),
+                    Clock2;
+                {error, write_conflict} ->
+                   %lager:warning("~w failed prepare", [TxId]),
+                    riak_core_vnode:reply(Sender, abort),
+                    Clock1
+            end
+    end.

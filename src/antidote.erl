@@ -23,6 +23,7 @@
 
 -export([update/3,
          read/1,
+         print_stat/0,
          execute_tx/2,
          execute_tx/3]).
 
@@ -45,6 +46,10 @@ update(Key, Op, Param) ->
 -spec read(Key::key()) -> {ok, val()} | {error, reason()}.
 read(Key) ->
     general_tx_coord_fsm:perform_singleitem_read(Key).
+
+print_stat() ->
+    Partitions = hash_fun:get_partitions(),
+    partition_vnode:print_stat(Partitions).
 
 %% Clock SI API
 
