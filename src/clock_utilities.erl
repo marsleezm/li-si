@@ -118,11 +118,19 @@ catch_up(Clock, SnapshotTime, AggrClock) ->
 force_catch_up(Clock, SnapshotTime) ->
     case Clock of
         #physical{last=Last} ->
-            {ok, Clock#physical{last=max(Last, SnapshotTime)}};
+            MaxTS = max(Last, SnapshotTime),
+            {ok, MaxTS, Clock#physical{last=MaxTS}};
         #fake_physical{last=Last} ->
-            {ok, Clock#fake_physical{last=max(Last, SnapshotTime)}};
-        _ ->
-	    {ok, Clock}
+            MaxTS = max(Last, SnapshotTime),
+            {ok, MaxTS, Clock#fake_physical{last=MaxTS}};
+        #logical{last=L} ->
+            {ok, max(L, SnapshotTime), Clock};
+        #aggr_logical{last=L} ->
+            {ok, max(L, SnapshotTime), Clock};
+        #hybrid{physical=P, logical=L} ->
+            {ok, max(SnapshotTime, max(L, P)), Clock};
+        #bravo{physical=P, logical=L} ->
+            {ok, max(SnapshotTime, max(L, P)), Clock}
     end.
 
 catch_up_if_aggr(MyClock, IncomingClock) ->

@@ -202,7 +202,7 @@ check_prepared_empty([{Partition,Node}|Rest]) ->
 	    true ->
             ok;
 	    false ->
-           lager:warning("Prepared not empty!")
+          lager:warning("Prepared not empty!")
     end,
 	check_prepared_empty(Rest).
 
@@ -241,13 +241,13 @@ handle_command({check_prepared_empty},_Sender,SD0=#state{prepared_txs=PreparedTx
 
 handle_command({pending_read, TxId, Key, Sender, Wait}, _From, SD0=#state{clock=Clock, prepared_txs=PreparedTxs,
                     inmemory_store=InMemoryStore, if_precise=IfPrecise}) ->
-    {ok, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
+    {ok, CatchedUpV, Clock0} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
     case ready_or_block(TxId, Key, PreparedTxs, Sender, Wait, Clock0, IfPrecise) of
         not_ready ->
             {noreply, SD0#state{clock=Clock0}};
         ready ->
             {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-            riak_core_vnode:reply(Sender, {ok, {Value, Missed, Wait}, Clock0}),
+            riak_core_vnode:reply(Sender, {ok, {Value, Missed, Wait}, CatchedUpV}),
             {noreply, SD0#state{clock=Clock0}}
     end;
 
@@ -259,13 +259,13 @@ handle_command({read, Key, TxId, AggrClock}, Sender, SD0=#state{clock=Clock, pre
             riak_core_vnode:send_command_after(round(Wait/1000), {pending_read, TxId, Key, Sender, Wait}),
             {noreply, SD0#state{clock=Clock0}};
         false ->
-	        {ok, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
+	        {ok, CatchedUpV, Clock1} = clock_utilities:force_catch_up(Clock0, TxId#tx_id.snapshot_time),
             case ready_or_block(TxId, Key, PreparedTxs, Sender, 0, Clock0, IfPrecise) of
                 not_ready ->
                     {noreply, SD0#state{clock=Clock1}};
                 ready ->
                     {ok, {Value, Missed}} = read_value(Key, TxId, InMemoryStore),
-                    riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}, Clock1}),
+                    riak_core_vnode:reply(Sender, {ok, {Value, Missed, 0}, CatchedUpV}),
                     {noreply, SD0#state{clock=Clock1}}
             end
     end;
@@ -298,7 +298,7 @@ handle_command({prepare, TxId, WriteSet, AggrClock}, Sender,
 			                  pending_prepare=PendingPrepare
                               }) ->
     {ok, Wait, Clock0} = clock_utilities:catch_up(Clock, TxId#tx_id.snapshot_time, AggrClock),
-   %lager:warning("~w prepare, waiting is ~w", [TxId, Wait]),
+   %lager:warning("~w prepare, waiting is ~w, Clock0 is ~w", [TxId, Wait, Clock0]),
     case round(Wait/1000) > 0 of
         true ->
 	        true = ets:insert(PendingPrepare, {TxId, pending}),
@@ -638,7 +638,8 @@ find_version([{TS, Value}|Rest], SnapshotTime, Missed) ->
     end.
 
 prepare_logic(TxId, WriteSet, CommittedTxs, PreparedTxs, IfCertify, Sender, Clock, Wait, IfPrecise) ->
-    {ok, Clock1} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
+    {ok, _, Clock1} = clock_utilities:force_catch_up(Clock, TxId#tx_id.snapshot_time),
+   %lager:warning("For tx ~w, Clock1 is ~w", [TxId, Clock1]),
     case IfPrecise of
         false ->
             {ok, PrepareTime, Clock2} = clock_utilities:get_prepare_time(Clock1),

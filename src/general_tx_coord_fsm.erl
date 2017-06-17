@@ -140,7 +140,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrCl
                                 error ->
                                     Preflist = hash_fun:get_preflist_from_key(Key),
                                     IndexNode = hd(Preflist),
-                                    %lager:warning("~w to access ~w", [Key, Preflist]),
+                                    %lager:waning("~w to access ~w", [Key, Preflist]),
                                     {ok, Snapshot, GotClock} = partition_vnode:read_data_item(IndexNode, Key, TxId, Clock0),
                                     {_Value, MissedVersions, WaitRead} = Snapshot,
                                     Missed1 = [MissedVersions|Missed0],
@@ -156,7 +156,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrCl
                             {UpdatedParts, [Snapshot|RSet], Buffer1, Wait1, Missed1, NewClock};
                         {update, Key, Op, Param} ->
                             Preflist = hash_fun:get_preflist_from_key(Key),
-                            %lager:warning("~w to access ~w", [Key, Preflist]),
+                            %lager:waning("~w to access ~w", [Key, Preflist]),
                             IndexNode = hd(Preflist),
                             UpdatedParts1 = case dict:is_key(IndexNode, UpdatedParts) of
                                                 false ->
@@ -183,7 +183,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrCl
             reply_to_client(SD#state{state=committed, tx_id=TxId, read_set=ReadSet1, wait=WaitRead, missed=FinalMissed,
                 prepare_time=TxId#tx_id.snapshot_time, aggr_clock=AggrClock1});
         N->
-           %lager:warning("TxId is ~w, waiting for ~w replies, writeset is ~w", [TxId, N, WriteSet1]),
+           %lager:waning("TxId is ~w, waiting for ~w replies, writeset is ~w", [TxId, N, WriteSet1]),
             partition_vnode:prepare(WriteSet1, TxId, AggrClock1),
             {next_state, receive_reply, SD#state{num_to_ack=N, state=prepared, wait=WaitRead, missed=FinalMissed,
                 updated_partitions=WriteSet1, read_set=ReadSet1, tx_id=TxId, aggr_clock=AggrClock1}}
@@ -219,7 +219,7 @@ receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartition
 %% @doc when the transaction has committed or aborted,
 %%       a reply is sent to the client that started the tx_id.
 reply_to_client(SD=#state{from=From, tx_id=TxId, state=TxState, read_set=ReadSet, prepare_time=CommitTime, wait=Wait, wait_prepare=WaitPrepare, missed=Missed}) ->
-   %lager:warning("Reply to client for ~w, txstate is ~w", [TxId, TxState]),
+   %lager:waning("Reply to client for ~w, txstate is ~w", [TxId, TxState]),
     case TxState of
         committed ->
           From ! {ok, {TxId, lists:reverse(ReadSet), CommitTime, Wait+WaitPrepare, Missed}},
