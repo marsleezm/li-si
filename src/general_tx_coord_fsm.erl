@@ -209,10 +209,12 @@ receive_reply({prepared, ReceivedPrepareTime, Wait},
     end;
 
 receive_reply(abort, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, aggr_clock=AggrClock}) ->
+    lager:warning("~w is aborted, aggrclock is ~w", [TxId, AggrClock]),
     partition_vnode:abort(UpdatedPartitions, TxId, AggrClock),
     reply_to_client(S0#state{state=aborted});
 
 receive_reply(timeout, S0=#state{tx_id=TxId, updated_partitions=UpdatedPartitions, aggr_clock=AggrClock}) ->
+    lager:warning("~w is aborted, aggrclock is ~w", [TxId, AggrClock]),
     partition_vnode:abort(UpdatedPartitions, TxId, AggrClock),
     reply_to_client(S0#state{state=aborted}).
 
