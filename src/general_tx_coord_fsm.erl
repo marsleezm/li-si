@@ -153,6 +153,7 @@ execute_batch_ops(timeout, SD=#state{causal_clock=CausalClock, aggr_clock=AggrCl
                                     Wait1 = Wait0 
                             end,
                             Buffer1 = dict:store(Key, Snapshot, Buffer),
+                            lager:warning("For ~w, Key is ~w, OldClock is ~w, NewClock is ~w", [TxId, Key, Clock0, NewClock]),
                             {UpdatedParts, [Snapshot|RSet], Buffer1, Wait1, Missed1, NewClock};
                         {update, Key, Op, Param} ->
                             Preflist = hash_fun:get_preflist_from_key(Key),

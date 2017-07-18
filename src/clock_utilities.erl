@@ -44,7 +44,7 @@ get_tx_id(_Operations, ignore, CausalClock) ->
     Len = length(Partitions),
     FirstNode = lists:nth(random:uniform(Len), Partitions),
     Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
-    %lager:warning("StartPartId ignore, geting ~w from ~w", [Ts, FirstNode]),
+    %%lager:warning("StartPartId ignore, geting ~w from ~w", [Ts, FirstNode]),
     #tx_id{snapshot_time=Ts, server_pid=self()};
     %case length(Operations) of
     %    0 ->
@@ -58,7 +58,7 @@ get_tx_id(_Operations, ignore, CausalClock) ->
 get_tx_id(_Operations, StartPartId, CausalClock) ->
     FirstNode = hd(hash_fun:get_preflist_from_key(StartPartId)),
     Ts = partition_vnode:get_snapshot_time(FirstNode, CausalClock),
-    %lager:warning("StartPartId ~w, geting ~w from ~w", [StartPartId, Ts, FirstNode]),
+    %%lager:warning("StartPartId ~w, geting ~w from ~w", [StartPartId, Ts, FirstNode]),
     #tx_id{snapshot_time=Ts, server_pid=self()}.
 
 init_clock(ClockType) ->
